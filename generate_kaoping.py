@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.0"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.5.0"""
 import os
 import sys
 import json
@@ -16,7 +16,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "1.1.0"
+VERSION = "1.5.0"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),
@@ -109,7 +109,7 @@ class ImageItem:
         img_row.pack(fill=tk.X, pady=(4, 0))
         ttk.Label(img_row, text="支撑材料:").pack(side=tk.LEFT, padx=(2, 4))
         self.drop_label = tk.Label(
-            img_row, text=f"拖入材料到此（图片/文档/表格等，最多{self.MAX_MATERIALS}个）或点击选择",
+            img_row, text=f"拖入材料到此（图片/文档/表格等，最多{self.MAX_MATERIALS}个）或点击选择；双击预览打开，右键删除单个，悬停显示完整文件名",
             bg="#E8F0FE", fg="#666", relief=tk.GROOVE,
             height=2, cursor="hand2")
         self.drop_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
@@ -163,6 +163,14 @@ class ImageItem:
             self.material_paths.remove(path)
             self._refresh_previews()
 
+    def _open_material(self, path):
+        """双击预览打开材料源文件"""
+        if path and os.path.exists(path):
+            try:
+                os.startfile(path)
+            except Exception:
+                pass
+
     def _refresh_previews(self):
         for w in self.thumb_frame.winfo_children():
             w.destroy()
@@ -194,7 +202,8 @@ class ImageItem:
                                cursor="hand2", justify=tk.CENTER)
             lab.grid(row=r, column=c, padx=3, pady=2, sticky="n")
             full = os.path.basename(p)
-            lab.bind("<Button-1>", lambda e, path=p: self._remove_material(path))
+            lab.bind("<Double-Button-1>", lambda e, path=p: self._open_material(path))
+            lab.bind("<Button-3>", lambda e, path=p: self._remove_material(path))
             lab.bind("<Enter>", lambda e, ww=lab, full=full: ww.config(text=full))
             lab.bind("<Leave>", lambda e, ww=lab, s=short: ww.config(text=s))
 
@@ -207,11 +216,6 @@ class ImageItem:
             "eval_desc": self.eval_var.get().strip(),
             "super_score": self.super_var.get().strip(),
         }
-
-    def fill_from_xlsx(self, item):
-        """xlsx 自动填充：得分 + 扣分说明（作为自评描述）"""
-        self.score_var.set(item.get("score", ""))
-        self.desc_var.set(item.get("desc", ""))
 
     def clear(self):
         self.desc_var.set("")
@@ -226,13 +230,14 @@ class App:
     def __init__(self, root):
         self.root = root
         self.cfg = _load_config()
-        self.persons = []
         self.items_widgets = []
         root.title(f"安全员安全生产责任制履职清单考评表自动生成工具 v{VERSION}")
         root.geometry("1180x860")
         root.minsize(1000, 700)
         self._build_ui()
         self._load_template_path()
+        # 首次运行自动生成本地文件名权重配置（material_rules.json）
+        kc.ensure_material_rules_file(BASE_DIR)
 
     # ============ 界面构建 ============
     def _build_ui(self):
@@ -252,24 +257,12 @@ class App:
         ttk.Spinbox(r1, from_=1, to=12, textvariable=self.month_var, width=5).pack(side=tk.LEFT, padx=(2, 12))
         ttk.Label(r1, text="姓名:").pack(side=tk.LEFT)
         self.name_var = tk.StringVar()
-        self.name_combo = ttk.Combobox(r1, textvariable=self.name_var, width=12)
+        self.name_combo = ttk.Combobox(r1, textvariable=self.name_var, width=10)
         self.name_combo.pack(side=tk.LEFT, padx=(2, 12))
-        self.name_combo.bind("<<ComboboxSelected>>", self._on_name_selected)
-        ttk.Label(r1, text="履职履责表:").pack(side=tk.LEFT)
-        self.xlsx_label = tk.Label(
-            r1, text="拖入当月履职履责表.xlsx 到此自动填充 或 点击选择",
-            bg="#DFF0D8", fg="#2c6e49", relief=tk.GROOVE,
-            height=1, cursor="hand2")
-        self.xlsx_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.xlsx_label.bind("<Button-1>", lambda e: self._load_xlsx())
-        self.xlsx_label.drop_target_register(DND_FILES)
-        self.xlsx_label.dnd_bind("<<Drop>>", self._drop_xlsx)
-
-        r2 = ttk.Frame(top); r2.pack(fill=tk.X, pady=2)
-        ttk.Label(r2, text="命名模板:").pack(side=tk.LEFT)
+        ttk.Label(r1, text="命名模板:").pack(side=tk.LEFT)
         self.pattern_var = tk.StringVar(value=self.cfg.get("pattern", kc.DEFAULT_NAME_PATTERN))
-        ttk.Entry(r2, textvariable=self.pattern_var, width=55).pack(side=tk.LEFT, padx=(2, 12))
-        ttk.Label(r2, text="(占位符: {Y}年 {X}月 {XXX}姓名)").pack(side=tk.LEFT)
+        ttk.Entry(r1, textvariable=self.pattern_var, width=40).pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Label(r1, text="(占位符: {Y}年 {X}月 {XXX}姓名)").pack(side=tk.LEFT)
 
         r3 = ttk.Frame(top); r3.pack(fill=tk.X, pady=2)
         ttk.Label(r3, text="模板文件:").pack(side=tk.LEFT)
@@ -293,14 +286,15 @@ class App:
         r4 = ttk.Frame(top); r4.pack(fill=tk.X, pady=2)
         ttk.Label(r4, text="支撑材料文件夹:").pack(side=tk.LEFT)
         self.mat_folder_label = tk.Label(
-            r4, text="选择月份文件夹，按文件名关键词自动匹配填入12个考评项",
+            r4, text="选择当月文件夹或年度根目录(如…\\2026)，按文件名权重自动匹配12个考评项",
             bg="#E8F0FE", fg="#555", relief=tk.GROOVE, cursor="hand2")
         self.mat_folder_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.mat_folder_label.bind("<Button-1>", lambda e: self._load_material_folder())
         self.mat_folder_label.drop_target_register(DND_FILES)
         self.mat_folder_label.dnd_bind("<<Drop>>", self._drop_material_folder)
         ttk.Button(r4, text="选择", width=8, command=self._load_material_folder).pack(side=tk.LEFT, padx=2)
-        ttk.Label(r4, text="(未匹配文件会提示，可手动拖入)").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(r4, text="编辑权重", width=8, command=self._open_material_rules).pack(side=tk.LEFT, padx=2)
+        ttk.Label(r4, text="(未匹配会提示；权重可本地改)").pack(side=tk.LEFT, padx=(8, 0))
 
         # ---- 中部：12 项滚动列表 ----
         mid_lf = ttk.LabelFrame(outer, text=" 各考评项填写（可拖拽图片/文档/表格材料） ", padding=4)
@@ -321,21 +315,30 @@ class App:
             w = ImageItem(self.list_frame, self.root, idx, title, std)
             self.items_widgets.append(w)
 
+        # 鼠标滚轮：悬停在任意子控件上也能滚动中部列表
+        self._bind_mousewheel(mid_lf)
+
         # ---- 底部工具栏 ----
         bottom = ttk.Frame(outer)
         bottom.pack(fill=tk.X, pady=(8, 0))
-        ttk.Button(bottom, text="读取履职履责表.xlsx 自动填充",
-                   command=self._load_xlsx).pack(side=tk.LEFT, padx=2)
+        # “一键生成”最先 pack 并靠右，窗口缩小也保留空间不被遮挡
+        self.btn_generate = ttk.Button(bottom, text="一键生成", command=self._generate)
+        self.btn_generate.pack(side=tk.RIGHT, padx=2)
         ttk.Button(bottom, text="清空全部", command=self._clear_all).pack(side=tk.LEFT, padx=2)
         self.prog = ttk.Progressbar(bottom, length=260, mode="determinate")
         self.prog.pack(side=tk.LEFT, padx=10)
         self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(bottom, textvariable=self.status_var, foreground="#555").pack(side=tk.LEFT, padx=8)
-        self.btn_generate = ttk.Button(bottom, text="一键生成", command=self._generate)
-        self.btn_generate.pack(side=tk.RIGHT, padx=2)
+        ttk.Label(bottom, textvariable=self.status_var, width=60,
+                  foreground="#555").pack(side=tk.LEFT, padx=8)
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    def _bind_mousewheel(self, widget):
+        """递归绑定滚轮事件，使鼠标悬停在任意子控件上也能滚动中部列表。"""
+        widget.bind("<MouseWheel>", self._on_mousewheel)
+        for child in widget.winfo_children():
+            self._bind_mousewheel(child)
 
     # ============ 模板 / 输出目录 ============
     def _load_template_path(self):
@@ -376,13 +379,24 @@ class App:
     def _load_material_folder(self, path=None):
         if not path:
             path = filedialog.askdirectory(
-                title="选择支撑材料文件夹（按文件名关键词自动匹配到12个考评项）")
+                title="选择支撑材料文件夹或年度根目录（自动定位当月子文件夹）")
         if not path:
             return
+        # 年度根目录自动定位当月子文件夹（如 2026.08 / 2026.8 / 8月）
+        try:
+            year = int(self.year_var.get().strip())
+            month = int(self.month_var.get().strip())
+        except ValueError:
+            year, month = None, None
+        if year and month and os.path.isdir(path):
+            sub = kc.find_month_subfolder(path, year, month)
+            if sub != os.path.abspath(path):
+                path = sub
         self.status_var.set("正在扫描支撑材料文件夹...")
         self.root.update()
+        rules = kc.load_material_rules(os.path.join(BASE_DIR, kc.MATERIAL_RULES_FILE))
         try:
-            result, unmatched = kc.scan_materials_folder(path)
+            result, unmatched = kc.scan_materials_folder(path, rules=rules)
         except Exception as e:
             messagebox.showerror("扫描失败", str(e))
             return
@@ -408,44 +422,15 @@ class App:
             messagebox.showinfo("未匹配文件",
                                 "以下文件未匹配到任何考评项，请手动拖入对应项：\n\n" + names)
 
-    # ============ xlsx 自动填充 ============
-    def _drop_xlsx(self, event):
-        files = self.root.tk.splitlist(event.data)
-        if files:
-            self._load_xlsx(files[0])
-
-    def _load_xlsx(self, path=None):
-        if not path:
-            path = filedialog.askopenfilename(
-                title="选择履职履责表.xlsx",
-                filetypes=[("Excel 文件", "*.xlsx;*.xlsm"), ("所有文件", "*.*")])
-        if not path:
-            return
+    # ============ 文件名权重配置 ============
+    def _open_material_rules(self):
+        """打开本地文件名权重配置文件（material_rules.json），便于按业务调整关键词。"""
+        path = kc.ensure_material_rules_file(BASE_DIR)
         try:
-            self.persons = kc.read_xlsx_scores(path)
+            os.startfile(path)
         except Exception as e:
-            messagebox.showerror("读取失败", str(e))
-            return
-        names = [x["name"] for x in self.persons]
-        self.name_combo["values"] = names
-        self.xlsx_label.config(text=os.path.basename(path), fg="#2c6e49")
-        self.status_var.set(f"已读取 {len(names)} 人：{'、'.join(names)}")
-        if names:
-            self.name_var.set(names[0])
-            self._apply_person(names[0])
-
-    def _on_name_selected(self, _event=None):
-        name = self.name_var.get().strip()
-        if name:
-            self._apply_person(name)
-
-    def _apply_person(self, name):
-        person = next((x for x in self.persons if x["name"] == name), None)
-        if not person:
-            return
-        for w in self.items_widgets:
-            w.fill_from_xlsx(person["items"].get(w.index, {}))
-        self.status_var.set(f"已按「{name}」填充 12 项自评得分与扣分说明")
+            messagebox.showerror("打开失败",
+                                 f"无法打开权重配置文件：\n{path}\n\n{e}")
 
     def _clear_all(self):
         for w in self.items_widgets:

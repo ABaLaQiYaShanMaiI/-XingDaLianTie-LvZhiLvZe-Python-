@@ -12,5 +12,6 @@ dist/
 
 # 程序运行产物
 kaoping_config.json
+material_rules.json
 _test_output.doc
 _ole_test.doc

@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.1.0"""
+"""安全员履职考评表生成核心逻辑 v1.3.0"""
 
+import json
 import os
 import re
 import sys
@@ -134,55 +135,120 @@ def read_xlsx_scores(xlsx_path):
 # ============ 支撑材料文件夹自动匹配 ============
 # 每个考评项的关键词表（按文件名/相对路径中的子文件夹名匹配）。
 # 第一词为该考评项标题词（权重 2），其余为扩展词（权重 1）；
-# 用户可按业务习惯在此增删关键词。
+# 界面“编辑权重”按钮可打开本地 material_rules.json 调整（修改后重启生效）。
+# 关键词基于各月实际文件夹命名归纳（如 扫雷→⑩、安全月报→⑫、安监网/安检网录入→⑪）。
 ITEM_MATCH_RULES = {
-    1: ["安全绩效", "绩效", "考核", "事故", "工伤", "轻伤"],
+    1: ["安全绩效", "绩效", "考核", "事故", "工伤", "轻伤", "月度会"],
     2: ["管理体系", "体系", "制度", "责任制", "标准化"],
-    3: ["教育培训", "培训", "教育", "学习", "课件", "交底", "考试", "双考"],
-    4: ["会议活动", "会议", "班会", "班前会", "活动", "纪要", "部署"],
-    5: ["检查改进", "检查", "巡查", "督查", "整改", "找茬", "大检查"],
+    3: ["教育培训", "培训", "教育", "学习", "课件", "交底", "考试", "双考", "应知", "安全活动"],
+    4: ["会议活动", "会议", "班会", "班前会", "活动", "纪要", "部署", "发言"],
+    5: ["检查改进", "检查", "巡查", "督查", "整改", "找茬", "大检查", "自查", "排查表"],
     6: ["应急演习", "应急", "演练", "演习", "预案"],
-    7: ["监督执行", "监督", "值守", "带班", "值班", "旁站"],
-    8: ["安全能力", "能力", "取证", "特种作业", "资格证", "上岗证"],
-    9: ["危险源", "风险", "危害", "辨识"],
-    10: ["隐患排查", "隐患", "排查", "扫雷"],
-    11: ["违章管理", "违章", "违规", "三违", "违纪"],
-    12: ["其它", "其他", "主题", "总结", "小结", "月报", "台账"],
+    7: ["监督执行", "监督", "值守", "带班", "值班", "旁站", "应急值守"],
+    8: ["安全能力", "能力", "取证", "特种作业", "资格证", "上岗证", "特种工", "证书", "规程", "复审"],
+    9: ["危险源", "风险", "危害", "辨识", "评估"],
+    10: ["隐患排查", "隐患", "排查", "扫雷", "有限空间"],
+    11: ["违章管理", "违章", "违规", "三违", "违纪", "反思", "安监网", "安检网", "禁令"],
+    12: ["其它", "其他", "主题", "总结", "小结", "月报", "台账", "人数", "体检", "协议", "资料",
+         "汇报", "保险", "方案", "通知", "清单"],
 }
 # 扫描时跳过：临时文件、考评表/履责表自身、无意义扩展名
 SKIP_FILE_PARTS = ("~$",)
-SKIP_NAME_PARTS = ("考评表", "履职履责表", "履职评价表", "履责表")
+SKIP_NAME_PARTS = ("考评表", "履职履责表", "履职评价表", "履责表", "履职履责")
 SKIP_EXTS = {".lnk", ".url", ".ini", ".tmp", ".db", ".py", ".pyc", ".md"}
 
+# 本地文件名权重配置文件（与 exe/脚本同目录，首次运行自动生成）
+MATERIAL_RULES_FILE = "material_rules.json"
 
-def match_materials_file(rel_path):
-    """按关键词把文件相对路径匹配到考评项，返回考评项编号(1~12)；无匹配返回 None。"""
-    text = rel_path.rsplit(".", 1)[0]  # 去掉扩展名，保留相对路径（含子文件夹名）
+
+def ensure_material_rules_file(base_dir=None):
+    """确保本地文件名权重配置文件存在（首次自动生成），返回其路径。"""
+    base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, MATERIAL_RULES_FILE)
+    if not os.path.exists(path):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({str(k): list(v) for k, v in ITEM_MATCH_RULES.items()},
+                          f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return path
+
+
+def load_material_rules(path=None):
+    """读取本地文件名权重配置；文件缺失/非法时回退内置 ITEM_MATCH_RULES。"""
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            rules = {}
+            for k, v in data.items():
+                idx = int(str(k).split(".")[0])          # 兼容 "1" / "1. 安全绩效"
+                if isinstance(v, dict):                  # 兼容 {"weight":2,"keywords":[...]}
+                    kw = v.get("keywords") or v.get("关键词") or []
+                else:
+                    kw = v
+                kw = [str(x).strip() for x in (kw or []) if str(x).strip()]
+                if kw:
+                    rules[idx] = kw
+            if rules:
+                return rules
+        except Exception:
+            pass
+    return dict(ITEM_MATCH_RULES)
+
+
+def score_materials_file(rel_path, rules):
+    """按权重打分并返回 (考评项编号, 得分)；无匹配返回 (None, 0)。
+    每个考评项第 1 词权重 2、其余词权重 1；命中分高者优先，同分取编号小者。"""
+    text = rel_path.rsplit(".", 1)[0]                    # 去扩展名，保留相对路径（含子文件夹名）
     scores = {}
-    for idx, kws in ITEM_MATCH_RULES.items():
+    for idx, kws in rules.items():
         s = 0
         for i, kw in enumerate(kws):
-            if kw in text:
+            if kw and kw in text:
                 s += 2 if i == 0 else 1
         if s:
             scores[idx] = s
     if not scores:
-        return None
-    # 命中分高者优先；同分取编号小者
-    return max(scores, key=lambda k: (scores[k], -k))
+        return None, 0
+    idx = max(scores, key=lambda k: (scores[k], -k))
+    return idx, scores[idx]
 
 
-def scan_materials_folder(folder, max_per_item=15):
-    """递归扫描支撑材料文件夹，按关键词自动匹配到各考评项。
+def match_materials_file(rel_path, rules=None):
+    """按关键词把文件相对路径匹配到考评项，返回编号(1~12)；无匹配返回 None。"""
+    idx, _score = score_materials_file(rel_path, rules or load_material_rules())
+    return idx
+
+
+def find_month_subfolder(folder, year, month):
+    """在年度/根目录中自动定位当月子文件夹（如 2026.08 / 2026.8 / 8月）。
+    找到返回其路径，否则原样返回 folder。"""
+    targets = {f"{year}.{month:02d}", f"{year}.{month}", f"{year}-{month:02d}",
+               f"{year}-{month}", f"{year}年{month}月", f"{month}月"}
+    try:
+        for name in os.listdir(folder):
+            full = os.path.join(folder, name)
+            if os.path.isdir(full) and name in targets:
+                return full
+    except Exception:
+        pass
+    return folder
+
+
+def scan_materials_folder(folder, max_per_item=15, rules=None):
+    """递归扫描支撑材料文件夹，按文件名权重自动匹配到各考评项。
 
     返回 (result, unmatched)：
-      result   = {1..12: [文件绝对路径...]}（每项最多 max_per_item 个）
+      result   = {1..12: [文件绝对路径...]}（每项最多 max_per_item 个，按权重分降序）
       unmatched= [未匹配(或超限)的文件绝对路径...]
     """
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
         raise ValueError("支撑材料文件夹不存在：" + folder)
-    result = {i: [] for i in range(1, 13)}
+    rules = rules or load_material_rules()
+    buckets = {i: [] for i in range(1, 13)}              # {idx: [(score, path)...]}
     unmatched = []
     for root, _dirs, files in os.walk(folder):
         for fn in sorted(files):
@@ -194,13 +260,15 @@ def scan_materials_folder(folder, max_per_item=15):
                 continue
             full = os.path.join(root, fn)
             rel = os.path.relpath(full, folder)
-            idx = match_materials_file(rel)
+            idx, score = score_materials_file(rel, rules)
             if idx is None:
                 unmatched.append(full)
-            elif len(result[idx]) < max_per_item:
-                result[idx].append(full)
+            elif len(buckets[idx]) < max_per_item:
+                buckets[idx].append((score, full))
             else:
                 unmatched.append(full)  # 超过每项上限，按未匹配提示用户手动处理
+    result = {i: [p for _s, p in sorted(bucket, key=lambda t: -t[0])]
+              for i, bucket in buckets.items()}
     return result, unmatched
 
 
