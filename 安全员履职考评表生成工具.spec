@@ -19,7 +19,6 @@ a = Analysis(
         'win32com.client.gencache',
         'pythoncom',
         'pywintypes',
-        'openpyxl',
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',

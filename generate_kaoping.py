@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.5.0"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.0.4"""
+import logging
 import os
 import sys
 import json
 import threading
+import time
 import ctypes
 from datetime import datetime
 
@@ -16,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "1.5.0"
+VERSION = "1.0.4"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),
@@ -39,7 +41,18 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "kaoping_config.json")
+LOG_PATH = os.path.join(BASE_DIR, "kaoping.log")
 THUMB_SIZE = (90, 90)
+
+
+def _setup_logging():
+    """日志写入程序同目录 kaoping.log，便于生成失败等问题的排查。"""
+    try:
+        logging.basicConfig(
+            filename=LOG_PATH, level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _load_config():
@@ -130,7 +143,7 @@ class ImageItem:
 
     def _on_drop(self, event):
         files = self.root.tk.splitlist(event.data)
-        self._add_materials(files)
+        self.add_materials(files)
 
     def _choose_materials(self):
         files = filedialog.askopenfilenames(
@@ -141,9 +154,9 @@ class ImageItem:
                        ("Excel 表格", "*.xls;*.xlsx"),
                        ("PDF", "*.pdf")])
         if files:
-            self._add_materials(list(files))
+            self.add_materials(list(files))
 
-    def _add_materials(self, files):
+    def add_materials(self, files):
         for p in files:
             if len(self.material_paths) >= self.MAX_MATERIALS:
                 messagebox.showwarning("提示", f"每个考评项最多 {self.MAX_MATERIALS} 个材料")
@@ -392,20 +405,28 @@ class App:
             sub = kc.find_month_subfolder(path, year, month)
             if sub != os.path.abspath(path):
                 path = sub
-        self.status_var.set("正在扫描支撑材料文件夹...")
-        self.root.update()
+        self.status_var.set(f"正在扫描：{os.path.basename(path)} ...")
+        self.mat_folder_label.config(text=f"扫描中… {os.path.basename(path)}", fg="#666")
         rules = kc.load_material_rules(os.path.join(BASE_DIR, kc.MATERIAL_RULES_FILE))
-        try:
-            result, unmatched = kc.scan_materials_folder(path, rules=rules)
-        except Exception as e:
-            messagebox.showerror("扫描失败", str(e))
-            return
+
+        def worker():
+            try:
+                result, unmatched = kc.scan_materials_folder(path, rules=rules)
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self._on_scan_failed(err))
+                return
+            self.root.after(0, lambda r=result, u=unmatched, p=path:
+                            self._on_scan_done(r, u, p))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_scan_done(self, result, unmatched, path):
         filled = 0
         for w in self.items_widgets:
             paths = result.get(w.index, [])
             if paths:
                 before = len(w.material_paths)
-                w._add_materials(paths)
+                w.add_materials(paths)
                 filled += len(w.material_paths) - before
         self.mat_folder_label.config(text=os.path.basename(path), fg="#2c6e49")
         detail = "，".join(f"{i}项{len(result[i])}" for i in range(1, 13) if result[i])
@@ -421,6 +442,12 @@ class App:
                 names += f"\n……共 {len(unmatched)} 个未匹配"
             messagebox.showinfo("未匹配文件",
                                 "以下文件未匹配到任何考评项，请手动拖入对应项：\n\n" + names)
+
+    def _on_scan_failed(self, err):
+        logging.error("扫描支撑材料失败: %s", err)
+        self.mat_folder_label.config(text="扫描失败", fg="#c0392b")
+        self.status_var.set("扫描失败")
+        messagebox.showerror("扫描失败", err)
 
     # ============ 文件名权重配置 ============
     def _open_material_rules(self):
@@ -475,14 +502,21 @@ class App:
                 return
 
         self.prog["value"] = 10
+        self._gen_started = time.time()
         self.status_var.set("正在生成（后台进行，可继续操作界面）...")
         self.btn_generate.config(state=tk.DISABLED)
 
         def worker():
             pythoncom.CoInitialize()
             try:
-                kc.generate_doc(tpl, out_path, name, month, items, year=year)
+                def cb(i):
+                    # 进度 10 → 88（12 项逐项推进），完成时置 100
+                    self.root.after(0, lambda v=i: self.prog.config(value=10 + int(v * 6.5)))
+
+                kc.generate_doc(tpl, out_path, name, month, items,
+                                year=year, progress_cb=cb)
             except Exception as e:
+                logging.exception("生成失败: %s", out_path)
                 self.root.after(0, lambda: self._on_generate_failed(str(e)))
             else:
                 self.root.after(0, lambda: self._on_generate_done(out_path, out_dir))
@@ -514,7 +548,9 @@ class App:
     def _on_generate_done(self, out_path, out_dir):
         self.btn_generate.config(state=tk.NORMAL)
         self.prog["value"] = 100
-        self.status_var.set("生成完成：" + out_path)
+        elapsed = time.time() - getattr(self, "_gen_started", time.time())
+        logging.info("生成成功: %s (耗时 %.1f 秒)", out_path, elapsed)
+        self.status_var.set(f"生成完成（{elapsed:.1f} 秒）：" + out_path)
         self.cfg["out_dir"] = out_dir
         self.cfg["pattern"] = self.pattern_var.get().strip()
         if not _save_config(self.cfg):
@@ -524,7 +560,7 @@ class App:
             self._open_file(out_path)
         elif messagebox.askyesno("生成完成",
                                  f"已生成：\n{out_path}\n\n是否打开所在文件夹？"):
-            self._open_folder(out_dir)
+            self._open_file(out_dir)   # startfile 打开目录
 
     def _on_generate_failed(self, err):
         self.btn_generate.config(state=tk.NORMAL)
@@ -538,13 +574,6 @@ class App:
         except Exception:
             pass
 
-    @staticmethod
-    def _open_folder(path):
-        try:
-            os.startfile(path)
-        except Exception:
-            pass
-
 
 def main():
     # 高 DPI 显示器适配（Win8.1+）：让 tkinter 按物理分辨率缩放，避免界面偏小
@@ -552,6 +581,7 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
+    _setup_logging()
     root = TkinterDnD.Tk()
     App(root)
     root.mainloop()

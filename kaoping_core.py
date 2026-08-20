@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.3.0"""
+"""安全员履职考评表生成核心逻辑 v1.0.4"""
 
 import json
 import os
@@ -26,13 +26,6 @@ COL_MATERIAL = 8
 COL_EVAL_DESC = 9
 COL_EVAL_SCORE = 10
 IMG_MAX_SIZE_CM = 2.0      # 图片/OLE 对象显示长宽上限（等比缩放，长宽均不超过该值）
-XLSX_SHEET = "安全员月度履职评价表"
-XLSX_SCORE_COLS = {1: "E", 2: "G", 3: "I", 4: "K", 5: "M", 6: "O",
-                   7: "Q", 8: "S", 9: "U", 10: "W", 11: "Y", 12: "AA"}
-XLSX_DESC_COLS = {1: "F", 2: "H", 3: "J", 4: "L", 5: "N", 6: "P",
-                  7: "R", 8: "T", 9: "V", 10: "X", 11: "Z", 12: "AB"}
-XLSX_NAME_COL = "D"
-XLSX_TOTAL_COL = "AC"
 DEFAULT_NAME_PATTERN = "安全员安全生产责任制履职清单考评表({X}月{XXX}).doc"
 
 
@@ -94,42 +87,6 @@ def build_filename(pattern, year, month, name, default_ext=".doc"):
     if stem0 in reserved:
         fn = "_" + fn
     return fn
-
-
-def read_xlsx_scores(xlsx_path):
-    """读取履职履责表.xlsx「安全员月度履职评价表」，返回人员列表。
-    每项: {name, total, items: {1..12: {'score': str, 'desc': str}}}
-    """
-    import openpyxl
-
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    if XLSX_SHEET not in wb.sheetnames:
-        raise ValueError("xlsx 中找不到工作表：" + XLSX_SHEET)
-    ws = wb[XLSX_SHEET]
-    name_col_idx = ws[XLSX_NAME_COL][0].column
-    persons = []
-    for r in range(5, ws.max_row + 1):
-        name = ws.cell(row=r, column=name_col_idx).value
-        if name is None or not str(name).strip():
-            continue
-        name = str(name).strip()
-        items = {}
-        for idx in range(1, 13):
-            sc = ws[XLSX_SCORE_COLS[idx] + str(r)].value
-            dc = ws[XLSX_DESC_COLS[idx] + str(r)].value
-            items[idx] = {
-                "score": "" if sc is None else str(sc).strip(),
-                "desc": "" if dc is None else str(dc).strip(),
-            }
-        total_cell = ws[XLSX_TOTAL_COL + str(r)].value
-        persons.append({
-            "name": name,
-            "total": "" if total_cell is None else str(total_cell).strip(),
-            "items": items,
-        })
-    if not persons:
-        raise ValueError("「安全员月度履职评价表」中没有读取到人员数据")
-    return persons
 
 
 # ============ 支撑材料文件夹自动匹配 ============
@@ -472,10 +429,12 @@ def _new_word_app():
         return win32com.client.Dispatch("Word.Application")
 
 
-def generate_doc(template_path, output_path, name, month, items, year=None):
+def generate_doc(template_path, output_path, name, month, items, year=None,
+                 progress_cb=None):
     """核心生成：打开模板副本 -> 填充 -> 另存为 .doc。
     items: {1..12: {'desc','score','material_text','material_images':[path],
                     'eval_desc','super_score'}}
+    progress_cb: 可选回调，每处理完一个考评项调用 progress_cb(idx)，idx=1..12。
     """
     if year is None:
         year = datetime.now().year
@@ -523,6 +482,11 @@ def generate_doc(template_path, output_path, name, month, items, year=None):
                 _insert_materials(mat_cell, materials)
             _set_cell_text(tb.Cell(row, COL_EVAL_DESC), item.get("eval_desc", ""))
             _set_cell_text(tb.Cell(row, COL_EVAL_SCORE), item.get("super_score", ""))
+            if progress_cb:
+                try:
+                    progress_cb(idx)
+                except Exception:
+                    pass
 
         self_total = _sum_scores(items, "score")
         super_total = _sum_scores(items, "super_score")
