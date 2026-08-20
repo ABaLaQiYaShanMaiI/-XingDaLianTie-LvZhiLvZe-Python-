@@ -9,14 +9,14 @@ a = Analysis(
     ['generate_kaoping.py'],
     pathex=[BASE],
     binaries=[],
-    datas=[
-        ('kaoping_core.py', '.'),
-        (os.path.join(BASE, '安全员安全生产责任制履职清单考评表（模板）.doc'), '.'),
-    ],
+    # 模板为外置文件：不内置进 exe，发布时与 exe 同目录分发
+    # （定位逻辑见 kaoping_core.find_template，旧版 exe 内置模板仍兼容）
+    datas=[],
     hiddenimports=[
         'tkinterdnd2',
         'win32com',
         'win32com.client',
+        'win32com.client.gencache',
         'pythoncom',
         'pywintypes',
         'openpyxl',

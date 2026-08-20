@@ -1,18 +1,22 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.0.0"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.0"""
 import os
 import sys
 import json
-import subprocess
+import threading
+import ctypes
 from datetime import datetime
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from PIL import Image, ImageTk
+import pythoncom
 
 import kaoping_core as kc
+
+VERSION = "1.1.0"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),
@@ -29,7 +33,11 @@ ITEM_LABELS = [
     (12, "其它", 10),
 ]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 打包(exe)后 __file__ 指向 _MEIPASS 临时目录，配置文件/默认输出目录需以 exe 目录为准
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "kaoping_config.json")
 THUMB_SIZE = (90, 90)
 
@@ -48,8 +56,9 @@ def _save_config(cfg):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
     except Exception:
-        pass
+        return False
 
 
 class ImageItem:
@@ -166,11 +175,11 @@ class ImageItem:
             short = os.path.basename(p)
             if len(short) > 12:
                 short = short[:11] + "…"
-            if kc._is_image(p):
+            if kc.is_image(p):
                 try:
-                    im = Image.open(p)
-                    im.thumbnail(THUMB_SIZE)
-                    photo = ImageTk.PhotoImage(im)
+                    with Image.open(p) as im:
+                        im.thumbnail(THUMB_SIZE)
+                        photo = ImageTk.PhotoImage(im)
                     self._thumb_refs.append(photo)
                     lab = tk.Label(self.thumb_frame, image=photo, text=short,
                                    compound=tk.TOP, relief=tk.RIDGE,
@@ -219,7 +228,7 @@ class App:
         self.cfg = _load_config()
         self.persons = []
         self.items_widgets = []
-        root.title("安全员安全生产责任制履职清单考评表自动生成工具 v1.0.0")
+        root.title(f"安全员安全生产责任制履职清单考评表自动生成工具 v{VERSION}")
         root.geometry("1180x860")
         root.minsize(1000, 700)
         self._build_ui()
@@ -280,6 +289,19 @@ class App:
         self.out_label.bind("<Button-1>", lambda e: self._sel_outdir())
         ttk.Button(r3, text="选择", width=8, command=self._sel_outdir).pack(side=tk.LEFT, padx=2)
 
+        # ---- 第4行：支撑材料文件夹自动匹配 ----
+        r4 = ttk.Frame(top); r4.pack(fill=tk.X, pady=2)
+        ttk.Label(r4, text="支撑材料文件夹:").pack(side=tk.LEFT)
+        self.mat_folder_label = tk.Label(
+            r4, text="选择月份文件夹，按文件名关键词自动匹配填入12个考评项",
+            bg="#E8F0FE", fg="#555", relief=tk.GROOVE, cursor="hand2")
+        self.mat_folder_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.mat_folder_label.bind("<Button-1>", lambda e: self._load_material_folder())
+        self.mat_folder_label.drop_target_register(DND_FILES)
+        self.mat_folder_label.dnd_bind("<<Drop>>", self._drop_material_folder)
+        ttk.Button(r4, text="选择", width=8, command=self._load_material_folder).pack(side=tk.LEFT, padx=2)
+        ttk.Label(r4, text="(未匹配文件会提示，可手动拖入)").pack(side=tk.LEFT, padx=(8, 0))
+
         # ---- 中部：12 项滚动列表 ----
         mid_lf = ttk.LabelFrame(outer, text=" 各考评项填写（可拖拽图片/文档/表格材料） ", padding=4)
         mid_lf.pack(fill=tk.BOTH, expand=True)
@@ -309,7 +331,8 @@ class App:
         self.prog.pack(side=tk.LEFT, padx=10)
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(bottom, textvariable=self.status_var, foreground="#555").pack(side=tk.LEFT, padx=8)
-        ttk.Button(bottom, text="一键生成", command=self._generate).pack(side=tk.RIGHT, padx=2)
+        self.btn_generate = ttk.Button(bottom, text="一键生成", command=self._generate)
+        self.btn_generate.pack(side=tk.RIGHT, padx=2)
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
@@ -342,6 +365,48 @@ class App:
         if p:
             self.out_var.set(p)
             self.out_label.config(text=p)
+
+    # ============ 支撑材料文件夹自动匹配 ============
+    def _drop_material_folder(self, event):
+        for p in self.root.tk.splitlist(event.data):
+            if os.path.isdir(p):
+                self._load_material_folder(p)
+                return
+
+    def _load_material_folder(self, path=None):
+        if not path:
+            path = filedialog.askdirectory(
+                title="选择支撑材料文件夹（按文件名关键词自动匹配到12个考评项）")
+        if not path:
+            return
+        self.status_var.set("正在扫描支撑材料文件夹...")
+        self.root.update()
+        try:
+            result, unmatched = kc.scan_materials_folder(path)
+        except Exception as e:
+            messagebox.showerror("扫描失败", str(e))
+            return
+        filled = 0
+        for w in self.items_widgets:
+            paths = result.get(w.index, [])
+            if paths:
+                before = len(w.material_paths)
+                w._add_materials(paths)
+                filled += len(w.material_paths) - before
+        self.mat_folder_label.config(text=os.path.basename(path), fg="#2c6e49")
+        detail = "，".join(f"{i}项{len(result[i])}" for i in range(1, 13) if result[i])
+        if len(detail) > 80:
+            detail = detail[:77] + "…"
+        suffix = (f"，{len(unmatched)} 个未匹配（可手动拖入）" if unmatched
+                  else "，全部匹配")
+        self.status_var.set(f"已自动填入 {filled} 个支撑材料{suffix}：{detail}")
+        # 未匹配文件过多时仅状态栏提示，避免弹窗刷屏
+        if 0 < len(unmatched) <= 200:
+            names = "\n".join(os.path.basename(u) for u in unmatched[:40])
+            if len(unmatched) > 40:
+                names += f"\n……共 {len(unmatched)} 个未匹配"
+            messagebox.showinfo("未匹配文件",
+                                "以下文件未匹配到任何考评项，请手动拖入对应项：\n\n" + names)
 
     # ============ xlsx 自动填充 ============
     def _drop_xlsx(self, event):
@@ -399,6 +464,12 @@ class App:
         except ValueError:
             messagebox.showwarning("提示", "年份/月份必须为数字")
             return
+        if not (2000 <= year <= 2100):
+            messagebox.showwarning("提示", "年份超出合理范围（2000~2100）")
+            return
+        if not (1 <= month <= 12):
+            messagebox.showwarning("提示", "月份必须为 1~12")
+            return
         tpl = self.tpl_var.get().strip()
         if not tpl or not os.path.exists(tpl):
             messagebox.showwarning("提示", "请先指定有效的模板文件(.doc)")
@@ -408,32 +479,72 @@ class App:
         items = {}
         for w in self.items_widgets:
             items[w.index] = w.to_item()
+        if not self._validate_items(items):
+            return
 
         out_name = kc.build_filename(self.pattern_var.get().strip(), year, month, name)
         out_path = os.path.join(out_dir, out_name)
         if os.path.exists(out_path):
-            if not messagebox.askyesno("文件已存在", f"文件已存在：\n{out_path}\n\n是否覆盖？"):
+            if not messagebox.askyesno("文件已存在",
+                                       f"文件已存在：\n{out_path}\n\n是否覆盖？"):
                 return
 
         self.prog["value"] = 10
-        self.status_var.set("正在生成...")
-        self.root.update()
-        try:
-            kc.generate_doc(tpl, out_path, name, month, items, year=year)
-            self.prog["value"] = 100
-            self.status_var.set("生成完成：" + out_path)
-            self.cfg["out_dir"] = out_dir
-            self.cfg["pattern"] = self.pattern_var.get().strip()
-            _save_config(self.cfg)
-            if messagebox.askyesno("生成完成",
-                                   f"已生成：\n{out_path}\n\n是否打开文件？"):
-                self._open_file(out_path)
-            elif messagebox.askyesno("生成完成",
-                                     f"已生成：\n{out_path}\n\n是否打开所在文件夹？"):
-                self._open_folder(out_dir)
-        except Exception as e:
-            self.status_var.set("生成失败：" + str(e))
-            messagebox.showerror("生成失败", str(e))
+        self.status_var.set("正在生成（后台进行，可继续操作界面）...")
+        self.btn_generate.config(state=tk.DISABLED)
+
+        def worker():
+            pythoncom.CoInitialize()
+            try:
+                kc.generate_doc(tpl, out_path, name, month, items, year=year)
+            except Exception as e:
+                self.root.after(0, lambda: self._on_generate_failed(str(e)))
+            else:
+                self.root.after(0, lambda: self._on_generate_done(out_path, out_dir))
+            finally:
+                pythoncom.CoUninitialize()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _validate_items(self, items):
+        """校验自评得分/上级评分：必须为 0~标准分 之间的数字。"""
+        std = {idx: s for idx, _t, s in ITEM_LABELS}
+        for idx, it in items.items():
+            for key, cn in (("score", "自评得分"), ("super_score", "上级评分")):
+                v = (it.get(key) or "").strip()
+                if not v:
+                    continue
+                try:
+                    num = float(v.rstrip("分"))
+                except ValueError:
+                    messagebox.showwarning("提示",
+                                           f"第 {idx} 项「{cn}」=「{v}」不是有效数字")
+                    return False
+                if num < 0 or num > std[idx]:
+                    messagebox.showwarning("提示",
+                                           f"第 {idx} 项「{cn}」= {num} 超出 0~{std[idx]} 分范围")
+                    return False
+        return True
+
+    def _on_generate_done(self, out_path, out_dir):
+        self.btn_generate.config(state=tk.NORMAL)
+        self.prog["value"] = 100
+        self.status_var.set("生成完成：" + out_path)
+        self.cfg["out_dir"] = out_dir
+        self.cfg["pattern"] = self.pattern_var.get().strip()
+        if not _save_config(self.cfg):
+            self.status_var.set("生成完成（配置记忆保存失败）：" + out_path)
+        if messagebox.askyesno("生成完成",
+                               f"已生成：\n{out_path}\n\n是否打开文件？"):
+            self._open_file(out_path)
+        elif messagebox.askyesno("生成完成",
+                                 f"已生成：\n{out_path}\n\n是否打开所在文件夹？"):
+            self._open_folder(out_dir)
+
+    def _on_generate_failed(self, err):
+        self.btn_generate.config(state=tk.NORMAL)
+        self.status_var.set("生成失败：" + err)
+        messagebox.showerror("生成失败", err)
 
     @staticmethod
     def _open_file(path):
@@ -451,6 +562,11 @@ class App:
 
 
 def main():
+    # 高 DPI 显示器适配（Win8.1+）：让 tkinter 按物理分辨率缩放，避免界面偏小
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
     root = TkinterDnD.Tk()
     App(root)
     root.mainloop()

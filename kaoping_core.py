@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.0.0"""
+"""安全员履职考评表生成核心逻辑 v1.1.0"""
 
 import os
 import re
@@ -8,8 +8,10 @@ import sys
 from datetime import datetime
 
 import win32com.client
+from win32com.client import gencache
 
 TEMPLATE_NAME = "安全员安全生产责任制履职清单考评表（模板）.doc"
+
 
 ITEM_ROWS = {
     1: 3, 2: 5, 3: 6, 4: 7, 5: 8, 6: 9,
@@ -22,8 +24,7 @@ COL_SELF_SCORE = 7
 COL_MATERIAL = 8
 COL_EVAL_DESC = 9
 COL_EVAL_SCORE = 10
-IMG_MAX_WIDTH_CM = 2.5
-IMG_MAX_HEIGHT_CM = 2.6
+IMG_MAX_SIZE_CM = 2.0      # 图片/OLE 对象显示长宽上限（等比缩放，长宽均不超过该值）
 XLSX_SHEET = "安全员月度履职评价表"
 XLSX_SCORE_COLS = {1: "E", 2: "G", 3: "I", 4: "K", 5: "M", 6: "O",
                    7: "Q", 8: "S", 9: "U", 10: "W", 11: "Y", 12: "AA"}
@@ -35,22 +36,36 @@ DEFAULT_NAME_PATTERN = "安全员安全生产责任制履职清单考评表({X}�
 
 
 def find_template(template_path=None):
-    """定位模板文件：显式路径 > 程序目录 > PyInstaller 资源目录"""
-    candidates = []
-    if template_path:
-        candidates.append(template_path)
-    base = os.path.dirname(os.path.abspath(__file__))
-    meipass = getattr(sys, "_MEIPASS", None)
-    candidates += [
+    """定位模板文件：显式路径 > exe/脚本目录 > 上一级目录 > _MEIPASS(旧版兼容)。
+
+    模板为外置文件：打包成 exe 后需与 exe 同目录（或上一级目录）分发，
+    不再内置到 exe 中；源码运行时按脚本所在目录定位。
+    """
+    if template_path and os.path.exists(template_path):
+        return template_path
+
+    # 打包(exe)时以 exe 所在目录为基准；源码运行时以脚本所在目录为基准
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+
+    candidates = [
         os.path.join(base, TEMPLATE_NAME),
-        os.path.join(base, "..", TEMPLATE_NAME),
+        os.path.join(os.path.dirname(base), TEMPLATE_NAME),
     ]
+    # 兼容旧版打包：模板仍被内置在 exe 资源目录(_MEIPASS)中的情况
+    meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        candidates.insert(0, os.path.join(meipass, TEMPLATE_NAME))
+        candidates.append(os.path.join(meipass, TEMPLATE_NAME))
     for c in candidates:
         if c and os.path.exists(c):
             return c
-    raise FileNotFoundError("找不到模板文件：" + TEMPLATE_NAME)
+    raise FileNotFoundError(
+        f"未找到模板文件 '{TEMPLATE_NAME}'，请确保模板在以下目录之一：{chr(10)}"
+        f"  - {base}{chr(10)}"
+        f"  - {os.path.dirname(base)}"
+    )
 
 
 def build_filename(pattern, year, month, name, default_ext=".doc"):
@@ -61,9 +76,22 @@ def build_filename(pattern, year, month, name, default_ext=".doc"):
     fn = fn.replace("{Y}", str(year)).replace("{年}", str(year))
     fn = fn.replace("{X}", str(month)).replace("{月份}", str(month))
     fn = fn.replace("{XXX}", str(name)).replace("{姓名}", str(name))
-    if not fn.lower().endswith((".doc", ".docx")):
-        fn += default_ext
     fn = re.sub(r'[\\/:*?"<>|]', "_", fn)
+    # 分离扩展名，只对主干做 Windows 消毒（去掉结尾点/空格）
+    if fn.lower().endswith(".docx"):
+        stem, ext = fn[:-5], fn[-5:]
+    elif fn.lower().endswith(".doc"):
+        stem, ext = fn[:-4], fn[-4:]
+    else:
+        stem, ext = fn, default_ext
+    stem = stem.rstrip(" .") or "未命名"
+    fn = stem + ext
+    # Windows 保留设备名（CON/PRN/AUX/NUL/COM1~9/LPT1~9），按第一个点前的主名判断
+    stem0 = fn.split(".", 1)[0].upper()
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} \
+        | {f"LPT{i}" for i in range(1, 10)}
+    if stem0 in reserved:
+        fn = "_" + fn
     return fn
 
 
@@ -103,6 +131,79 @@ def read_xlsx_scores(xlsx_path):
     return persons
 
 
+# ============ 支撑材料文件夹自动匹配 ============
+# 每个考评项的关键词表（按文件名/相对路径中的子文件夹名匹配）。
+# 第一词为该考评项标题词（权重 2），其余为扩展词（权重 1）；
+# 用户可按业务习惯在此增删关键词。
+ITEM_MATCH_RULES = {
+    1: ["安全绩效", "绩效", "考核", "事故", "工伤", "轻伤"],
+    2: ["管理体系", "体系", "制度", "责任制", "标准化"],
+    3: ["教育培训", "培训", "教育", "学习", "课件", "交底", "考试", "双考"],
+    4: ["会议活动", "会议", "班会", "班前会", "活动", "纪要", "部署"],
+    5: ["检查改进", "检查", "巡查", "督查", "整改", "找茬", "大检查"],
+    6: ["应急演习", "应急", "演练", "演习", "预案"],
+    7: ["监督执行", "监督", "值守", "带班", "值班", "旁站"],
+    8: ["安全能力", "能力", "取证", "特种作业", "资格证", "上岗证"],
+    9: ["危险源", "风险", "危害", "辨识"],
+    10: ["隐患排查", "隐患", "排查", "扫雷"],
+    11: ["违章管理", "违章", "违规", "三违", "违纪"],
+    12: ["其它", "其他", "主题", "总结", "小结", "月报", "台账"],
+}
+# 扫描时跳过：临时文件、考评表/履责表自身、无意义扩展名
+SKIP_FILE_PARTS = ("~$",)
+SKIP_NAME_PARTS = ("考评表", "履职履责表", "履职评价表", "履责表")
+SKIP_EXTS = {".lnk", ".url", ".ini", ".tmp", ".db", ".py", ".pyc", ".md"}
+
+
+def match_materials_file(rel_path):
+    """按关键词把文件相对路径匹配到考评项，返回考评项编号(1~12)；无匹配返回 None。"""
+    text = rel_path.rsplit(".", 1)[0]  # 去掉扩展名，保留相对路径（含子文件夹名）
+    scores = {}
+    for idx, kws in ITEM_MATCH_RULES.items():
+        s = 0
+        for i, kw in enumerate(kws):
+            if kw in text:
+                s += 2 if i == 0 else 1
+        if s:
+            scores[idx] = s
+    if not scores:
+        return None
+    # 命中分高者优先；同分取编号小者
+    return max(scores, key=lambda k: (scores[k], -k))
+
+
+def scan_materials_folder(folder, max_per_item=15):
+    """递归扫描支撑材料文件夹，按关键词自动匹配到各考评项。
+
+    返回 (result, unmatched)：
+      result   = {1..12: [文件绝对路径...]}（每项最多 max_per_item 个）
+      unmatched= [未匹配(或超限)的文件绝对路径...]
+    """
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        raise ValueError("支撑材料文件夹不存在：" + folder)
+    result = {i: [] for i in range(1, 13)}
+    unmatched = []
+    for root, _dirs, files in os.walk(folder):
+        for fn in sorted(files):
+            if fn.startswith(SKIP_FILE_PARTS):
+                continue
+            if any(p in fn for p in SKIP_NAME_PARTS):
+                continue
+            if os.path.splitext(fn)[1].lower() in SKIP_EXTS:
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, folder)
+            idx = match_materials_file(rel)
+            if idx is None:
+                unmatched.append(full)
+            elif len(result[idx]) < max_per_item:
+                result[idx].append(full)
+            else:
+                unmatched.append(full)  # 超过每项上限，按未匹配提示用户手动处理
+    return result, unmatched
+
+
 def _set_cell_text(cell, text):
     """写入单元格文本，保留模板原有字体/段落格式（Range 替换法）。"""
     text = "" if text is None else str(text)
@@ -127,37 +228,70 @@ def _cm2pt(v):
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"}
 
 
-def _is_image(path):
+def is_image(path):
     """判断文件是否为可内嵌图片。"""
     return os.path.splitext(path)[1].lower() in IMAGE_EXTS
 
 
 def _insert_image(cell, path):
-    """在单元格末尾插入单张图片（内嵌），自动等比缩放。"""
+    """在单元格末尾插入单张图片（内嵌），自动等比缩放，长宽均不超过 IMG_MAX_SIZE_CM。"""
     from PIL import Image
 
     with Image.open(path) as im:
         ow, oh = im.size
     if ow <= 0 or oh <= 0:
         return False
-    tw = _cm2pt(IMG_MAX_WIDTH_CM)
-    th = oh * tw / ow
-    if th > _cm2pt(IMG_MAX_HEIGHT_CM):
-        th = _cm2pt(IMG_MAX_HEIGHT_CM)
-        tw = ow * th / oh
+    max_pt = _cm2pt(IMG_MAX_SIZE_CM)
+    scale = min(max_pt / ow, max_pt / oh)
+    tw = round(ow * scale, 1)
+    th = round(oh * scale, 1)
     rng = cell.Range
     rng.End = rng.End - 1      # 排除单元格结束符 \x07
     rng.Collapse(0)            # 折叠到单元格末尾内部
     shp = cell.Range.InlineShapes.AddPicture(FileName=path, LinkToFile=False,
                                              SaveWithDocument=True, Range=rng)
-    shp.Width = round(tw, 1)
-    shp.Height = round(th, 1)
+    shp.Width = tw
+    shp.Height = th
     return True
+
+
+def _fit_inline_size(shp):
+    """将内嵌对象（图片/OLE）等比缩放，使长宽均不超过 IMG_MAX_SIZE_CM。
+
+    实测：图片/Excel 等 OLE 可通过 Width/Height 赋值缩放，
+    而 Word 文档类 OLE 图标会忽略 Width/Height 赋值，需改用
+    ScaleWidth/ScaleHeight（相对原始尺寸的百分比）。
+    """
+    max_pt = _cm2pt(IMG_MAX_SIZE_CM)
+    try:
+        w, h = shp.Width, shp.Height
+    except Exception:
+        return
+    if w <= 0 or h <= 0 or (w <= max_pt and h <= max_pt):
+        return
+    scale = min(max_pt / w, max_pt / h)
+    # 方式一：直接设置宽高（对图片/Excel OLE 有效）
+    try:
+        shp.Width = round(w * scale, 1)
+        shp.Height = round(h * scale, 1)
+    except Exception:
+        pass
+    # 方式二：若宽高赋值未生效（Word 文档类 OLE），改用百分比缩放
+    try:
+        w2 = shp.Width
+    except Exception:
+        w2 = w
+    if w2 <= 0 or w2 >= w - 0.5:
+        try:
+            shp.ScaleWidth = round(scale * 100, 1)
+            shp.ScaleHeight = round(scale * 100, 1)
+        except Exception:
+            pass
 
 
 def _insert_ole(cell, path):
     """在单元格末尾插入文件为 OLE 嵌入对象（图标+文件名，可双击打开）。
-    保持 Word 自然显示尺寸（图标+文件名标签），单元格内自动换行适配。
+    保持 Word 自然显示尺寸（图标+文件名标签），随后等比缩小到 IMG_MAX_SIZE_CM 以内。
     """
     name = os.path.basename(path)
     rng = cell.Range
@@ -166,6 +300,7 @@ def _insert_ole(cell, path):
     shp = cell.Range.InlineShapes.AddOLEObject(
         FileName=path, LinkToFile=False, DisplayAsIcon=True, IconLabel=name,
         Range=rng)
+    _fit_inline_size(shp)
     return True
 
 
@@ -176,7 +311,7 @@ def _insert_materials(cell, material_paths):
     valid = [p for p in material_paths if p and os.path.exists(p)]
     for idx, path in enumerate(valid):
         try:
-            if _is_image(path):
+            if is_image(path):
                 _insert_image(cell, path)
             else:
                 _insert_ole(cell, path)
@@ -192,34 +327,40 @@ def _insert_materials(cell, material_paths):
             r2.InsertParagraphAfter()
 
 
+def _replace_slot(body, label, next_label, value):
+    """替换 body 中「label ... next_label」区间内的值，保留区间首尾空白。
+    - 若区间原值存在（如旧姓名），新值顶替原值，首尾空白不变；
+    - 若区间全为空白（模板留空待填），新值居中放置。
+    """
+    li = body.find(label)
+    if li < 0:
+        return body
+    start = li + len(label)
+    ni = body.find(next_label, start)
+    end = ni if ni >= 0 else len(body)
+    seg = body[start:end]
+    if not seg.strip():
+        # 全空白：把空白对半分，值放中间
+        n = len(seg)
+        head, tail = n // 2, n - n // 2
+        return body[:start] + seg[:head] + value + seg[n - tail:] + body[end:]
+    head = len(seg) - len(seg.lstrip())
+    tail = len(seg) - len(seg.rstrip())
+    new_seg = seg[:head] + value + (seg[len(seg) - tail:] if tail else "")
+    return body[:start] + new_seg + body[end:]
+
+
 def _fill_header(cell, name, month):
     """替换表头 R1 中的姓名与评价月份。
-    用标签区间截取法，避免正则组引用歧义。
+    用标签区间截取法，避免正则组引用歧义；保留空白占位区，值居中写入。
     """
     raw = cell.Range.Text
     body = raw.replace("\x07", "").rstrip("\r")
 
     # 姓名：考评对象（安全员）：...管理者姓名
-    m = re.search(r"(考评对象（安全员）：)\s*", body)
-    if m:
-        start = m.end()
-        rest = body[start:]
-        next_label = rest.find("管理者姓名")
-        seg = rest if next_label < 0 else rest[:next_label]
-        trailing = re.search(r"\s*$", seg)
-        trailing_ws = trailing.group(0) if trailing else ""
-        body = body[:start] + str(name).strip() + trailing_ws + rest[len(seg):]
-
+    body = _replace_slot(body, "考评对象（安全员）：", "管理者姓名", str(name).strip())
     # 月份：评价月份：...评价人员签字
-    m = re.search(r"(评价月份：)\s*", body)
-    if m:
-        start = m.end()
-        rest = body[start:]
-        next_label = rest.find("评价人员签字")
-        seg = rest if next_label < 0 else rest[:next_label]
-        trailing = re.search(r"\s*$", seg)
-        trailing_ws = trailing.group(0) if trailing else ""
-        body = body[:start] + str(month).strip() + "月" + trailing_ws + rest[len(seg):]
+    body = _replace_slot(body, "评价月份：", "评价人员签字", str(month).strip() + "月")
 
     rng = cell.Range
     rng.End = rng.End - 1
@@ -244,6 +385,25 @@ def _sum_scores(items, key):
     return str(int(total)) if total == int(total) else str(total)
 
 
+def _new_word_app():
+    """创建 Word COM 实例。
+
+    必须用静态类型库分派(gencache.EnsureDispatch)：动态分派(Dispatch)下
+    InlineShapes.AddOLEObject 在无界面 Word 环境会挂起（实测复现）。
+    PyInstaller 打包环境自动回退到动态分派，并优先把类型库缓存指向临时目录。
+    """
+    if getattr(sys, "frozen", False):
+        try:
+            gencache.is_readonly = False
+            gencache.GetGeneratePath()
+        except Exception:
+            pass
+    try:
+        return gencache.EnsureDispatch("Word.Application")
+    except Exception:
+        return win32com.client.Dispatch("Word.Application")
+
+
 def generate_doc(template_path, output_path, name, month, items, year=None):
     """核心生成：打开模板副本 -> 填充 -> 另存为 .doc。
     items: {1..12: {'desc','score','material_text','material_images':[path],
@@ -251,13 +411,26 @@ def generate_doc(template_path, output_path, name, month, items, year=None):
     """
     if year is None:
         year = datetime.now().year
-    word = win32com.client.Dispatch("Word.Application")
+    word = _new_word_app()
     word.Visible = False
     word.DisplayAlerts = 0
     doc = None
     try:
         doc = word.Documents.Open(os.path.abspath(template_path))
         tb = doc.Tables(1)
+
+        # 模板结构校验：防止模板被替换/改版后错格写入
+        rows, cols = tb.Rows.Count, tb.Columns.Count
+        if rows != TOTAL_ROW or cols != 10:
+            raise ValueError(
+                f"模板表格结构异常：期望 {TOTAL_ROW} 行×10 列，实际 {rows} 行×{cols} 列，"
+                f"请更换正确模板（{TEMPLATE_NAME}）"
+            )
+        header = tb.Cell(HEADER_ROW, 1).Range.Text
+        if "考评对象" not in header or "评价月份" not in header:
+            raise ValueError(
+                "模板表头缺少「考评对象（安全员）」或「评价月份」标签，请更换正确模板"
+            )
 
         _fill_header(tb.Cell(HEADER_ROW, 1), name, month)
 
@@ -287,6 +460,16 @@ def generate_doc(template_path, output_path, name, month, items, year=None):
         super_total = _sum_scores(items, "super_score")
         _set_cell_text(tb.Cell(TOTAL_ROW, COL_SELF_DESC), self_total)
         _set_cell_text(tb.Cell(TOTAL_ROW, COL_EVAL_DESC), super_total)
+
+        # 保存前统一缩放 C8 全部内嵌对象（图片/OLE），确保长宽均 ≤ IMG_MAX_SIZE_CM。
+        # OLE 对象在插入瞬间尺寸可能未稳定，故在此兜底再缩放一次。
+        for idx in range(1, 13):
+            try:
+                mat_cell = tb.Cell(ITEM_ROWS[idx], COL_MATERIAL)
+                for shp in list(mat_cell.Range.InlineShapes):
+                    _fit_inline_size(shp)
+            except Exception:
+                pass
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         doc.SaveAs2(os.path.abspath(output_path), 0)
