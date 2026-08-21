@@ -53,6 +53,8 @@ a = Analysis(
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',
+        'openpyxl',
+        'olefile',
     ],
     hookspath=[],
     hooksconfig={},

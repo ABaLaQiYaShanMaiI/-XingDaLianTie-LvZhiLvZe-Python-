@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.0（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.3.0（兼容 Windows 7 SP1 ~ Windows 11）"""
 import logging
 import os
 import sys
@@ -18,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "1.1.0"
+VERSION = "1.3.0"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),
@@ -313,6 +313,19 @@ class App:
         ttk.Button(r4, text="编辑权重", width=8, command=self._open_material_rules).pack(side=tk.LEFT, padx=2)
         ttk.Label(r4, text="(未匹配会提示；权重可本地改)").pack(side=tk.LEFT, padx=(8, 0))
 
+        # ---- 第5行：读取已生成考评表(.doc) ----
+        r5 = ttk.Frame(top); r5.pack(fill=tk.X, pady=2)
+        ttk.Label(r5, text="读取考评表:").pack(side=tk.LEFT)
+        self.import_label = tk.Label(
+            r5, text="选择已生成的考评表(.doc)，自动读取 12 项评分/评价与支撑材料到界面，便于替换后生成新月份",
+            bg="#E8F0FE", fg="#555", relief=tk.GROOVE, cursor="hand2")
+        self.import_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.import_label.bind("<Button-1>", lambda e: self._read_kaoping_doc())
+        self.import_label.drop_target_register(DND_FILES)
+        self.import_label.dnd_bind("<<Drop>>", self._drop_kaoping_doc)
+        ttk.Button(r5, text="读取考评表", width=10, command=self._read_kaoping_doc).pack(side=tk.LEFT, padx=2)
+        ttk.Label(r5, text="(材料提取到输出目录\\提取材料，可双击预览/右键替换)").pack(side=tk.LEFT, padx=(8, 0))
+
         # ---- 中部：12 项滚动列表 ----
         mid_lf = ttk.LabelFrame(outer, text=" 各考评项填写（可拖拽图片/文档/表格材料） ", padding=4)
         mid_lf.pack(fill=tk.BOTH, expand=True)
@@ -453,6 +466,66 @@ class App:
         self.status_var.set("扫描失败")
         messagebox.showerror("扫描失败", err)
 
+    # ============ 读取已生成考评表(.doc) ============
+    def _read_kaoping_doc(self):
+        """选择已生成的考评表(.doc)，把评分/评价/支撑材料回填到界面。"""
+        path = filedialog.askopenfilename(title="选择已生成的考评表(.doc)",
+                                          filetypes=[("Word 文档", "*.doc"),
+                                                     ("所有文件", "*.*")])
+        if path:
+            self._apply_kaoping_doc(path)
+
+    def _drop_kaoping_doc(self, event):
+        for p in self.root.tk.splitlist(event.data):
+            if os.path.isfile(p):
+                self._apply_kaoping_doc(p)
+                return
+
+    def _apply_kaoping_doc(self, path):
+        """读取 .doc：姓名/月份/12 项自评与上级评价/支撑材料回填到界面，材料提取到输出目录\\提取材料。"""
+        if not path or not os.path.exists(path):
+            messagebox.showwarning("提示", "文件不存在：" + str(path))
+            return
+        out_dir = os.path.join(self.out_var.get().strip() or BASE_DIR, "提取材料")
+        try:
+            self.status_var.set("正在读取考评表…")
+            data = kc.extract_kaoping_doc(path, out_dir=out_dir)
+        except Exception as e:
+            logging.error("读取考评表失败: %s", e)
+            messagebox.showerror("读取失败", str(e))
+            return
+        name = data.get("name") or ""
+        month = data.get("month") or ""
+        if name:
+            self.name_var.set(name)
+        if month:
+            self.month_var.set(month)
+        mat_count = 0
+        for idx, it in data["items"].items():
+            w = self.items_widgets[idx - 1]
+            if it.get("desc"):
+                w.desc_var.set(it["desc"])
+            if it.get("score"):
+                w.score_var.set(it["score"])
+            if it.get("material_text"):
+                w.mat_var.set(it["material_text"])
+            if it.get("eval_desc"):
+                w.eval_var.set(it["eval_desc"])
+            if it.get("super_score"):
+                w.super_var.set(it["super_score"])
+            mats = [p for p in (it.get("materials") or []) if p and os.path.exists(p)]
+            if mats:
+                w.add_materials(mats)
+                mat_count += len(mats)
+        self.import_label.config(text=os.path.basename(path), fg="#2c6e49")
+        who = name + ("%s月" % month if month else "")
+        msg = "已读取 %s 考评表：12 项内容 + %d 个支撑材料%s" % (
+            who or os.path.basename(path), mat_count,
+            "；材料已提取到 " + out_dir if mat_count else "")
+        self.status_var.set(msg)
+        if data.get("warnings"):
+            messagebox.showwarning("读取提示", "\n".join(data["warnings"]))
+
     # ============ 文件名权重配置 ============
     def _open_material_rules(self):
         """打开本地文件名权重配置文件（material_rules.json），便于按业务调整关键词。"""
@@ -559,6 +632,17 @@ class App:
         self.cfg["pattern"] = self.pattern_var.get().strip()
         if not _save_config(self.cfg):
             self.status_var.set("生成完成（配置记忆保存失败）：" + out_path)
+        try:
+            size_mb = os.path.getsize(out_path) / 1048576.0
+            if size_mb > 100:
+                messagebox.showwarning(
+                    "文件体积过大",
+                    f"生成的文档约 {size_mb:.0f}MB。\n\n"
+                    "非图片材料（Excel/Word/PDF 等）会以 OLE 方式整文件嵌入文档，\n"
+                    "体积由源文件决定；图片类材料已在嵌入前压缩。\n"
+                    "如需控制体积，请精简源文件后重新生成。")
+        except Exception:
+            pass
         if messagebox.askyesno("生成完成",
                                f"已生成：\n{out_path}\n\n是否打开文件？"):
             self._open_file(out_path)

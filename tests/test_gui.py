@@ -114,7 +114,7 @@ def test_app_build_layout():
         root, app = _new_app(tmp)
         try:
             assert len(app.items_widgets) == 12
-            assert not hasattr(app, "xlsx_label")      # 已移除 xlsx / 参照表残留
+            assert hasattr(app, "import_label")        # v1.3.0 读取已生成考评表(.doc)
             assert not hasattr(app, "ref_label")
             assert not hasattr(app, "ref_materials")
             bottom = app.btn_generate.master           # “一键生成”最先布局，缩小不被遮挡
@@ -123,6 +123,10 @@ def test_app_build_layout():
             btns = [c.cget("text") for c in app.mat_folder_label.master.winfo_children()
                     if c.winfo_class() == "TButton"]
             assert "编辑权重" in btns, btns
+            btns2 = [c.cget("text") for c in app.import_label.master.winfo_children()
+                     if c.winfo_class() == "TButton"]
+            assert "读取考评表" in btns2, btns2
+
         finally:
             root.destroy()
     finally:
@@ -217,6 +221,48 @@ def test_generate_done_status():
             assert "秒" in app.status_var.get()
         finally:
             root.destroy()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_apply_kaoping_doc_fill():
+    """读取已生成考评表(.doc) 后回填姓名/月份/评分评价/材料（mock 核心提取）。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        fake_doc = os.path.join(tmp, "孙忠7月.doc")
+        open(fake_doc, "w").close()
+        fake_mat = _touch(tmp, "材料", "证据.xlsx")
+        fake_data = {
+            "name": "孙忠", "month": "7", "warnings": ["某警告"],
+            "items": {i: {"desc": "", "score": "", "material_text": "",
+                          "materials": [], "eval_desc": "", "super_score": ""}
+                      for i in range(1, 13)},
+        }
+        fake_data["items"][1] = {"desc": "未发生事故", "score": "20",
+                                 "material_text": "未发生事故", "materials": [],
+                                 "eval_desc": "未发生", "super_score": "20"}
+        fake_data["items"][11] = {"desc": "未按违章查处", "score": "5",
+                                  "material_text": "", "materials": [fake_mat],
+                                  "eval_desc": "未按", "super_score": "5"}
+        orig = kc.extract_kaoping_doc
+        kc.extract_kaoping_doc = lambda p, out_dir=None, progress_cb=None: fake_data
+        try:
+            root, app = _new_app(tmp)
+            try:
+                app._apply_kaoping_doc(fake_doc)
+                assert app.name_var.get() == "孙忠"
+                assert app.month_var.get() == "7"
+                it1 = app.items_widgets[0]
+                assert it1.desc_var.get() == "未发生事故"
+                assert it1.score_var.get() == "20" and it1.super_var.get() == "20"
+                it11 = app.items_widgets[10]
+                assert it11.score_var.get() == "5"
+                assert it11.material_paths == [fake_mat]
+                assert "12 项" in app.status_var.get()
+            finally:
+                root.destroy()
+        finally:
+            kc.extract_kaoping_doc = orig
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

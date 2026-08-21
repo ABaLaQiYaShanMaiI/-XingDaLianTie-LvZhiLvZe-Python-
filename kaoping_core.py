@@ -1,11 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.1.0（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员履职考评表生成核心逻辑 v1.3.0（兼容 Windows 7 SP1 ~ Windows 11）"""
 
 import json
+import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
+import time
 from datetime import datetime
 
 import win32com.client
@@ -229,6 +233,385 @@ def scan_materials_folder(folder, max_per_item=15, rules=None):
     return result, unmatched
 
 
+# ============ 月度履职履责表(xlsx) 评分自动读取 ============
+# 目标 sheet：「安全员月度履职评价表」（关键字匹配，排除「评价标准」）。
+# 布局（2026 年 6/7/8 月多份实测，兴达/铁厂版一致）：
+#   表头行为含「扣分说明」的行；偶数列为 12 个考评项名、奇数列为其扣分说明；
+#   姓名在「姓名」列（D 列）；得分合计在含「得分」「合计」的表头列（AC 列）。
+XLSX_SHEET_INCLUDE = ("安全员", "评价")
+XLSX_SHEET_EXCLUDE = ("标准",)
+# 12 个考评项在 xlsx 表头中的匹配关键词（任一命中即可）
+XLSX_ITEM_KEYWORDS = {
+    1: ("安全绩效",),
+    2: ("管理体系", "体系"),
+    3: ("教育培训", "培训"),
+    4: ("会议活动", "会议"),
+    5: ("检查改进", "检查"),
+    6: ("应急演习", "应急", "演习", "演练"),
+    7: ("监督执行", "监督"),
+    8: ("安全能力", "能力"),
+    9: ("危险源", "危险源", "风险"),
+    10: ("隐患排查", "隐患"),
+    11: ("违章管理", "违章"),
+    12: ("其它", "其他"),
+}
+
+
+def read_eval_scores(xlsx_path, name):
+    """从月度履职履责表 xlsx 读取指定姓名安全员的 12 项评分与扣分说明。
+
+    返回 {"name": 姓名, "items": {1..12: {"score": str, "desc": str}},
+           "total": 总分(str 或 "")}。
+    未找到 sheet / 表头 / 姓名时抛出 ValueError 并附可用信息。
+    """
+    import openpyxl
+
+    def _norm(v):
+        return "".join(str(v).split()) if v is not None else ""
+
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+    sheet = None
+    for sn in wb.sheetnames:
+        if (all(k in sn for k in XLSX_SHEET_INCLUDE)
+                and not any(k in sn for k in XLSX_SHEET_EXCLUDE)):
+            sheet = wb[sn]
+            break
+    if sheet is None:
+        raise ValueError("未找到「安全员月度履职评价表」sheet，可用：%s"
+                         % "、".join(wb.sheetnames))
+
+    # 1) 表头行：含「扣分说明」的行
+    header_row = None
+    for r in range(1, min(sheet.max_row, 8) + 1):
+        if any("扣分说明" in _norm(sheet.cell(row=r, column=c).value)
+               for c in range(1, sheet.max_column + 1)):
+            header_row = r
+            break
+    if header_row is None:
+        raise ValueError("未找到考评项表头行（含「扣分说明」），文件格式可能已变化")
+
+    # 2) 姓名列 / 得分合计列（在表头行之前找标签）
+    name_col, total_col = None, None
+    for r in range(1, header_row):
+        for c in range(1, sheet.max_column + 1):
+            h = _norm(sheet.cell(row=r, column=c).value)
+            if h == "姓名" and name_col is None:
+                name_col = c
+            if "得分" in h and total_col is None:
+                total_col = c
+    if name_col is None:
+        name_col = 4  # 兜底：D 列
+
+    # 3) 项名列：表头按关键词匹配 12 个考评项
+    header_vals = {c: _norm(sheet.cell(row=header_row, column=c).value)
+                   for c in range(1, sheet.max_column + 1)}
+    item_cols = {}
+    for idx in range(1, 13):
+        kws = XLSX_ITEM_KEYWORDS[idx]
+        hit = [c for c, h in header_vals.items()
+               if h and any(k in h for k in kws) and c not in item_cols.values()]
+        if not hit:
+            raise ValueError("表头中未找到第 %d 项「%s」，文件格式可能已变化"
+                             % (idx, ITEM_MATCH_RULES[idx][0]))
+        item_cols[idx] = hit[0]
+
+    # 4) 定位姓名行
+    person_row, names = None, []
+    for r in range(header_row + 1, sheet.max_row + 1):
+        nm = sheet.cell(row=r, column=name_col).value
+        if nm is None or not str(nm).strip():
+            continue
+        names.append(str(nm).strip())
+        if str(nm).strip() == name.strip():
+            person_row = r
+            break
+    if person_row is None:
+        raise ValueError("文件中未找到姓名「%s」，可用姓名：%s"
+                         % (name, "、".join(names) if names else "(空)"))
+
+    # 5) 读取 12 项评分与扣分说明、总分
+    items = {}
+    for idx, col in item_cols.items():
+        items[idx] = {
+            "score": _norm(sheet.cell(row=person_row, column=col).value),
+            "desc": _norm(sheet.cell(row=person_row, column=col + 1).value),
+        }
+    total = _norm(sheet.cell(row=person_row, column=total_col).value) if total_col else ""
+    return {"name": name.strip(), "items": items, "total": total}
+
+
+# ============ 已生成考评表(.doc) 读取（评分/评价/支撑材料） ============
+_ZIP_MAGIC = b"PK\x03\x04"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _safe_filename(name):
+    """Windows 文件名消毒。"""
+    name = re.sub(r'[\\/:*?"<>|]', "_", str(name)).strip(" .")
+    return name or "未命名"
+
+
+def _parse_kaoping_header(header_text):
+    """解析考评表表头 R1，返回 (姓名, 月份数字串)。"""
+    body = (header_text or "").replace("\x07", "").rstrip("\r")
+
+    def _slot(text, label, next_label):
+        li = text.find(label)
+        if li < 0:
+            return ""
+        start = li + len(label)
+        for ch in ("：", ":"):
+            ci = text.find(ch, start)
+            if ci >= 0:
+                start = ci + 1
+                break
+        ni = text.find(next_label, start)
+        return "".join(text[start:ni if ni > 0 else len(text)].split())
+
+    name = _slot(body, "考评对象", "管理者姓名")
+    month = _slot(body, "评价月份", "评价人员").rstrip("月").strip()
+    return name, month
+
+
+def _cell_text(tb, row, col):
+    """读取表格单元格纯文本。"""
+    try:
+        return tb.Cell(row, col).Range.Text.replace("\x07", "").replace("\r", "").strip()
+    except Exception:
+        return ""
+
+
+def _export_inline_picture(shp, out_path):
+    """将内嵌图片保存为 PNG（CopyAsPicture -> 剪贴板 -> Pillow）。返回是否成功。"""
+    from PIL import Image, ImageGrab
+    try:
+        shp.Range.CopyAsPicture()
+        img = ImageGrab.grabclipboard()
+        if isinstance(img, Image.Image):
+            img.save(out_path)
+            return os.path.exists(out_path)
+    except Exception:
+        pass
+    return False
+
+
+def _export_ole_via_com(shp, idx, no, out_dir):
+    """尝试用 Word COM 直接导出原生 OLE 对象（Word/Excel 可 SaveAs）。
+
+    返回 (kind, 已保存路径或 None)。kind 供 ObjectPool 分组对应：
+    'excel' / 'word_doc' / 'word_docx' / 'pkg'。
+    """
+    try:
+        progid = shp.OLEFormat.ProgID or ""
+    except Exception:
+        progid = ""
+    if "Excel" in progid:
+        kind = "excel"
+    elif "Word.Document.12" in progid:
+        kind = "word_docx"
+    elif "Word.Document" in progid:
+        kind = "word_doc"
+    else:
+        return "pkg", None
+    try:
+        obj = shp.OLEFormat.Object
+        if kind == "excel":
+            out = os.path.join(out_dir, "项%d_材料%d.xlsx" % (idx, no))
+            obj.SaveAs(out, 51)
+            return kind, out
+        ext = "docx" if kind == "word_docx" else "doc"
+        out = os.path.join(out_dir, "项%d_材料%d.%s" % (idx, no, ext))
+        save = getattr(obj, "SaveAs2", obj.SaveAs)
+        save(out, 12 if kind == "word_docx" else 0)
+        return kind, out
+    except Exception:
+        return kind, None
+
+
+def _ole_kind_match(want, have):
+    """ObjectPool 条目 kind 是否满足 OLE 形状的 kind 需求。"""
+    if want == "excel":
+        return have in ("excel", "file")
+    if want in ("word_docx", "word_doc"):
+        return have in ("word_docx", "word_native", "pkg", "file")
+    # 'pkg'（通用包）可匹配任何可提取类型
+    return have in ("pkg", "file", "excel", "word_docx")
+
+
+def _extract_ole10native(raw):
+    """从 \x01Ole10Native 流提取原始文件，返回 (原始文件名, 文件内容 bytes) 或 (None, None)。"""
+    off = 0
+    if len(raw) > 4 and int.from_bytes(raw[0:4], "little") == len(raw) - 4:
+        off = 4
+    if raw[off:off + 2] != b"\x02\x00":
+        return None, None
+    p = off + 2
+    e = raw.find(b"\x00", p)
+    fname = raw[p:e].decode("gbk", "ignore").strip() if e >= 0 else ""
+    for magic in (_ZIP_MAGIC, _OLE_MAGIC):
+        cstart = raw.find(magic)
+        if cstart < 4:
+            continue
+        clen = int.from_bytes(raw[cstart - 4:cstart], "little")
+        if 0 < clen <= len(raw) - cstart:
+            return fname or None, raw[cstart:cstart + clen]
+    return fname or None, None
+
+
+def _read_doc_object_pool(doc_path):
+    """用 olefile 读取 .doc 的 ObjectPool，返回按文档顺序的
+    [(storage名, kind, 文件字节, 原始文件名)]。
+    kind：'excel'(package流) / 'word_docx'(package流+Word) / 'pkg'(Ole10Native) /
+          'word_native'(原生 WordDocument 流，需 COM 导出) / 'unknown'。
+    """
+    import re as _re
+
+    import olefile
+    ole = olefile.OleFileIO(doc_path)
+    entries = []
+    try:
+        seen = set()
+        for path in ole.listdir():
+            if len(path) >= 2 and path[0] == "ObjectPool":
+                name = path[1]
+                if name in seen:
+                    continue
+                seen.add(name)
+                progid = ""
+                if ole.exists(["ObjectPool", name, "\x01CompObj"]):
+                    data = ole.openstream(["ObjectPool", name, "\x01CompObj"]).read()
+                    m = _re.search(rb"[\x20-\x7e]{6,}", data)
+                    if m:
+                        progid = m.group(0).decode("ascii", "ignore")
+                content, fname, kind = None, "", "unknown"
+                if ole.exists(["ObjectPool", name, "package"]):
+                    content = ole.openstream(["ObjectPool", name, "package"]).read()
+                    kind = ("excel" if "Excel" in progid
+                            else "word_docx" if "Word" in progid else "file")
+                elif ole.exists(["ObjectPool", name, "\x01Ole10Native"]):
+                    raw = ole.openstream(["ObjectPool", name, "\x01Ole10Native"]).read()
+                    fname, content = _extract_ole10native(raw)
+                    kind = "pkg"
+                elif ole.exists(["ObjectPool", name, "WordDocument"]):
+                    kind = "word_native"
+                entries.append((name, kind, content, fname))
+    finally:
+        ole.close()
+    return entries
+
+
+def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
+    """读取已生成的考评表 .doc：姓名/月份/12 项自评与上级评价/支撑材料。
+
+    支撑材料（图片/OLE 内嵌文件）提取保存到 out_dir（默认 .doc 同目录"提取材料"）。
+    返回 {"name", "month", "items": {1..12: {"desc","score","material_text",
+           "materials":[文件路径], "eval_desc","super_score"}}, "warnings":[str]}。
+    """
+    doc_path = os.path.abspath(doc_path)
+    out_dir = out_dir or os.path.join(os.path.dirname(doc_path), "提取材料")
+    os.makedirs(out_dir, exist_ok=True)
+    warnings = []
+
+    # ---- 阶段1：Word COM 读取文字 + 提取图片 + 记录 OLE 出现顺序 ----
+    word = _new_word_app()
+    word.Visible = False
+    word.DisplayAlerts = 0
+    doc = None
+    items = {}
+    ole_shape_items = []  # 需阶段2提取的 OLE 对象：每元素 = (考评项 idx, kind)
+    try:
+        doc = word.Documents.Open(doc_path)
+        tb = doc.Tables(1)
+        if tb.Rows.Count != TOTAL_ROW or tb.Columns.Count != 10:
+            raise ValueError("表格结构异常：期望 %d 行×10 列，实际 %d 行×%d 列"
+                             % (TOTAL_ROW, tb.Rows.Count, tb.Columns.Count))
+        header_text = tb.Cell(HEADER_ROW, 1).Range.Text
+        name, month = _parse_kaoping_header(header_text)
+        for idx in range(1, 13):
+            row = ITEM_ROWS[idx]
+            items[idx] = {
+                "desc": _cell_text(tb, row, COL_SELF_DESC),
+                "score": _cell_text(tb, row, COL_SELF_SCORE),
+                "material_text": "",
+                "materials": [],
+                "eval_desc": _cell_text(tb, row, COL_EVAL_DESC),
+                "super_score": _cell_text(tb, row, COL_EVAL_SCORE),
+            }
+            mat_cell = tb.Cell(row, COL_MATERIAL)
+            mat_txt = (mat_cell.Range.Text.replace("\x07", "")
+                       .replace("\r", "").replace("\x01", "").strip())
+            items[idx]["material_text"] = mat_txt
+            pic_no = 0
+            ole_no = 0
+            for s in list(mat_cell.Range.InlineShapes):
+                if s.Type == 3:  # 图片
+                    pic_no += 1
+                    out = os.path.join(out_dir, "项%d_图%d.png" % (idx, pic_no))
+                    if _export_inline_picture(s, out):
+                        items[idx]["materials"].append(out)
+                    else:
+                        warnings.append("第 %d 项第 %d 张图片提取失败" % (idx, pic_no))
+                else:            # OLE 对象：原生 Office 尝试 COM 导出，其余交阶段2
+                    ole_no += 1
+                    _kind, saved = _export_ole_via_com(s, idx, ole_no, out_dir)
+                    if saved:
+                        items[idx]["materials"].append(saved)
+                    else:
+                        ole_shape_items.append((idx, _kind))
+            if progress_cb:
+                try:
+                    progress_cb(idx)
+                except Exception:
+                    pass
+    finally:
+        if doc is not None:
+            try:
+                doc.Close(False)
+            except Exception:
+                pass
+        word.Quit()
+
+    # ---- 阶段2：olefile 提取未由 COM 导出的 OLE 内嵌文件（按 kind 分组顺序对应）----
+    try:
+        entries = _read_doc_object_pool(doc_path)
+    except Exception as e:
+        warnings.append("OLE 材料解析失败：" + str(e))
+        entries = []
+    if entries and ole_shape_items:
+        unused = [pos for pos in range(len(entries)) if entries[pos][2]]
+        counters = {}
+        for idx, want_kind in ole_shape_items:
+            chosen = None
+            for pos in unused:
+                if _ole_kind_match(want_kind, entries[pos][1]):
+                    chosen = pos
+                    break
+            if chosen is None:
+                warnings.append("第 %d 项 OLE 材料未能对应到内嵌文件" % idx)
+                continue
+            unused.remove(chosen)
+            _ename, kind, content, fname = entries[chosen]
+            counters[idx] = counters.get(idx, 0) + 1
+            if kind == "excel":
+                fname_out = "项%d_材料%d.xlsx" % (idx, counters[idx])
+            elif kind == "word_docx":
+                fname_out = "项%d_材料%d.docx" % (idx, counters[idx])
+            else:
+                base = os.path.basename(fname) or "项%d_材料%d" % (idx, counters[idx])
+                fname_out = base if os.path.splitext(base)[1] else base + ".bin"
+            out = os.path.join(out_dir, _safe_filename(fname_out))
+            try:
+                with open(out, "wb") as f:
+                    f.write(content)
+                items[idx]["materials"].append(out)
+            except Exception as e:
+                warnings.append("第 %d 项材料保存失败：%s" % (idx, e))
+        if unused:
+            warnings.append("有 %d 个内嵌文件未对应到考评项（可能为文档中其他位置对象）" % len(unused))
+
+    return {"name": name, "month": month, "items": items, "warnings": warnings}
+
+
 def _set_cell_text(cell, text):
     """写入单元格文本，保留模板原有字体/段落格式（Range 替换法）。"""
     text = "" if text is None else str(text)
@@ -258,18 +641,71 @@ def is_image(path):
     return os.path.splitext(path)[1].lower() in IMAGE_EXTS
 
 
-def _insert_image(cell, path):
-    """在单元格末尾插入单张图片（内嵌），自动等比缩放，长宽均不超过 IMG_MAX_SIZE_CM。"""
+MAX_EMBED_PX = 1600  # 图片嵌入文档前的最大边长（像素），压缩超大照片避免 .doc 体积失控
+FIT_TOLERANCE_PT = 0.5  # 尺寸达标容差(pt)：Word 返回宽高常带浮点尾差（如 56.700001）
+
+
+def _fit_size(w, h, max_cm):
+    """计算在 max_cm(厘米) 限制内的目标尺寸(pt)。
+
+    已达标（含浮点容差）原样返回。调用方以返回值是否变化来判断是否需要缩放；
+    对象本身已在 2cm 内时绝不能进入缩放分支——否则再次调用
+    ScaleWidth/ScaleHeight=100 会把已缩好的对象放回原始大小，破坏版式
+    （曾实测：2cm 内图片被还原成 486×864pt，撑爆表格）。
+    """
+    max_pt = _cm2pt(max_cm)
+    if w <= 0 or h <= 0:
+        return w, h
+    if w <= max_pt + FIT_TOLERANCE_PT and h <= max_pt + FIT_TOLERANCE_PT:
+        return w, h
+    scale = min(max_pt / w, max_pt / h)
+    return round(w * scale, 1), round(h * scale, 1)
+
+
+def _prepare_image_file(path, tmp_dir):
+    """图片边长超过 MAX_EMBED_PX 时，等比压缩到 tmp_dir 下的临时文件。
+
+    返回 (嵌入路径, 是否为临时文件)。压缩只影响文档体积，显示尺寸仍由
+    IMG_MAX_SIZE_CM 控制；任何异常都回退原文件，不影响主流程。
+    """
     from PIL import Image
 
+    try:
+        with Image.open(path) as im:
+            w, h = im.size
+        if w <= MAX_EMBED_PX and h <= MAX_EMBED_PX:
+            return path, False
+        scale = min(MAX_EMBED_PX / w, MAX_EMBED_PX / h)
+        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+        is_png = os.path.splitext(path)[1].lower() == ".png"
+        suffix = ".png" if is_png else ".jpg"
+        fd, tmp = tempfile.mkstemp(suffix=suffix, dir=tmp_dir)
+        os.close(fd)
+        with Image.open(path) as im:
+            im = im.resize((nw, nh), Image.LANCZOS)
+            if is_png:
+                im.save(tmp, "PNG")
+            else:
+                im.convert("RGB").save(tmp, "JPEG", quality=88)
+        return tmp, True
+    except Exception:
+        return path, False
+
+
+def _insert_image(cell, path, tmp_dir=None):
+    """在单元格末尾插入单张图片（内嵌），自动等比缩放，长宽均不超过 IMG_MAX_SIZE_CM。
+
+    tmp_dir 非空时先对超大图片做像素压缩（控制 .doc 体积），再插入。
+    """
+    from PIL import Image
+
+    if tmp_dir:
+        path, _tmp = _prepare_image_file(path, tmp_dir)
     with Image.open(path) as im:
         ow, oh = im.size
     if ow <= 0 or oh <= 0:
         return False
-    max_pt = _cm2pt(IMG_MAX_SIZE_CM)
-    scale = min(max_pt / ow, max_pt / oh)
-    tw = round(ow * scale, 1)
-    th = round(oh * scale, 1)
+    tw, th = _fit_size(ow, oh, IMG_MAX_SIZE_CM)
     rng = cell.Range
     rng.End = rng.End - 1      # 排除单元格结束符 \x07
     rng.Collapse(0)            # 折叠到单元格末尾内部
@@ -286,28 +722,36 @@ def _fit_inline_size(shp):
     实测：图片/Excel 等 OLE 可通过 Width/Height 赋值缩放，
     而 Word 文档类 OLE 图标会忽略 Width/Height 赋值，需改用
     ScaleWidth/ScaleHeight（相对原始尺寸的百分比）。
+
+    注意：对象已在 2cm 内（含浮点尾差）必须直接返回；否则再次调用
+    ScaleWidth/ScaleHeight=100 会把已缩好的对象放回原始大小，
+    曾实测导致输出文档中图片被放大到自然尺寸、撑爆表格版式。
     """
     max_pt = _cm2pt(IMG_MAX_SIZE_CM)
     try:
         w, h = shp.Width, shp.Height
     except Exception:
         return
-    if w <= 0 or h <= 0 or (w <= max_pt and h <= max_pt):
+    tw, th = _fit_size(w, h, IMG_MAX_SIZE_CM)
+    if tw == w and th == h:
         return
-    scale = min(max_pt / w, max_pt / h)
     # 方式一：直接设置宽高（对图片/Excel OLE 有效）
     try:
-        shp.Width = round(w * scale, 1)
-        shp.Height = round(h * scale, 1)
+        shp.Width = tw
+        shp.Height = th
     except Exception:
         pass
-    # 方式二：若宽高赋值未生效（Word 文档类 OLE），改用百分比缩放
+    # 方式二：若宽高赋值未生效（尺寸几乎没变，如 Word 文档类 OLE 图标），
+    # 改用百分比缩放（相对原始尺寸），等比缩到 2cm 以内。
     try:
-        w2 = shp.Width
+        w2, h2 = shp.Width, shp.Height
     except Exception:
-        w2 = w
-    if w2 <= 0 or w2 >= w - 0.5:
+        w2, h2 = w, h
+    if w2 <= 0 or h2 <= 0:
+        return
+    if w2 >= w - 0.5 or h2 >= h - 0.5:
         try:
+            scale = min(max_pt / w, max_pt / h)
             shp.ScaleWidth = round(scale * 100, 1)
             shp.ScaleHeight = round(scale * 100, 1)
         except Exception:
@@ -329,15 +773,16 @@ def _insert_ole(cell, path):
     return True
 
 
-def _insert_materials(cell, material_paths):
+def _insert_materials(cell, material_paths, tmp_dir=None):
     """向单元格末尾依次插入支撑材料：
     图片 -> 内嵌图片；其他文件 -> OLE 嵌入对象；失败则退化为文件名文字。
+    tmp_dir 非空时对超大图片做像素压缩（控制文档体积）。
     """
     valid = [p for p in material_paths if p and os.path.exists(p)]
     for idx, path in enumerate(valid):
         try:
             if is_image(path):
-                _insert_image(cell, path)
+                _insert_image(cell, path, tmp_dir)
             else:
                 _insert_ole(cell, path)
         except Exception:
@@ -429,6 +874,20 @@ def _new_word_app():
         return win32com.client.Dispatch("Word.Application")
 
 
+def _cell_retry(tb, row, col, attempts=2, delay=0.5):
+    """读取表格单元格；Word 在嵌入 OLE/大图后偶发表格网格抖动，失败时短延重试。
+
+    两次都失败则照常抛出，由上层统一报错（不产出残缺文档）。
+    """
+    for i in range(attempts):
+        try:
+            return tb.Cell(row, col)
+        except Exception:
+            if i < attempts - 1:
+                time.sleep(delay)
+    return tb.Cell(row, col)
+
+
 def generate_doc(template_path, output_path, name, month, items, year=None,
                  progress_cb=None):
     """核心生成：打开模板副本 -> 填充 -> 另存为 .doc。
@@ -442,6 +901,8 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
     word.Visible = False
     word.DisplayAlerts = 0
     doc = None
+    # 图片压缩临时目录：超大图片先压到 MAX_EMBED_PX 内再嵌入，控制 .doc 体积
+    tmp_dir = tempfile.mkdtemp(prefix="kaoping_mat_")
     try:
         doc = word.Documents.Open(os.path.abspath(template_path))
         tb = doc.Tables(1)
@@ -464,9 +925,9 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
         for idx in range(1, 13):
             row = ITEM_ROWS[idx]
             item = items.get(idx) or {}
-            _set_cell_text(tb.Cell(row, COL_SELF_DESC), item.get("desc", ""))
-            _set_cell_text(tb.Cell(row, COL_SELF_SCORE), item.get("score", ""))
-            mat_cell = tb.Cell(row, COL_MATERIAL)
+            _set_cell_text(_cell_retry(tb, row, COL_SELF_DESC), item.get("desc", ""))
+            _set_cell_text(_cell_retry(tb, row, COL_SELF_SCORE), item.get("score", ""))
+            mat_cell = _cell_retry(tb, row, COL_MATERIAL)
             _clear_cell_content(mat_cell)
             mat_text = (item.get("material_text") or "").strip()
             materials = [p for p in (item.get("materials")
@@ -479,9 +940,9 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
                     r2 = mat_cell.Range
                     r2.Collapse(0)
                     r2.InsertParagraphAfter()
-                _insert_materials(mat_cell, materials)
-            _set_cell_text(tb.Cell(row, COL_EVAL_DESC), item.get("eval_desc", ""))
-            _set_cell_text(tb.Cell(row, COL_EVAL_SCORE), item.get("super_score", ""))
+                _insert_materials(mat_cell, materials, tmp_dir)
+            _set_cell_text(_cell_retry(tb, row, COL_EVAL_DESC), item.get("eval_desc", ""))
+            _set_cell_text(_cell_retry(tb, row, COL_EVAL_SCORE), item.get("super_score", ""))
             if progress_cb:
                 try:
                     progress_cb(idx)
@@ -494,14 +955,26 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
         _set_cell_text(tb.Cell(TOTAL_ROW, COL_EVAL_DESC), super_total)
 
         # 保存前统一缩放 C8 全部内嵌对象（图片/OLE），确保长宽均 ≤ IMG_MAX_SIZE_CM。
-        # OLE 对象在插入瞬间尺寸可能未稳定，故在此兜底再缩放一次。
+        # OLE 对象在插入瞬间尺寸可能未稳定，故在此兜底再缩放一次；
+        # 仍有超限者记入日志，便于排查（正常情况下不应再有 2cm 外对象）。
+        max_pt = _cm2pt(IMG_MAX_SIZE_CM)
+        oversized = []
         for idx in range(1, 13):
             try:
-                mat_cell = tb.Cell(ITEM_ROWS[idx], COL_MATERIAL)
+                mat_cell = _cell_retry(tb, ITEM_ROWS[idx], COL_MATERIAL)
                 for shp in list(mat_cell.Range.InlineShapes):
                     _fit_inline_size(shp)
+                    try:
+                        if (shp.Width > max_pt + FIT_TOLERANCE_PT
+                                or shp.Height > max_pt + FIT_TOLERANCE_PT):
+                            oversized.append((idx, round(shp.Width, 1),
+                                              round(shp.Height, 1)))
+                    except Exception:
+                        pass
             except Exception:
                 pass
+        if oversized:
+            logging.warning("生成文档中仍有超出 2cm 上限的对象: %s", oversized)
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         # SaveAs2 是 Word 2010+ 的方法；Word 2007 机器自动回退 SaveAs，兼容性更好
@@ -514,6 +987,7 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
             except Exception:
                 pass
         word.Quit()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     return output_path
 
 
