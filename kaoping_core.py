@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.3.0（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员履职考评表生成核心逻辑 v1.1.2（兼容 Windows 7 SP1 ~ Windows 11）"""
 
 import json
 import logging
@@ -395,7 +395,7 @@ def _export_inline_picture(shp, out_path):
     return False
 
 
-def _export_ole_via_com(shp, idx, no, out_dir):
+def _export_ole_via_com(shp, idx, no, out_dir, iconlabel=""):
     """尝试用 Word COM 直接导出原生 OLE 对象（Word/Excel 可 SaveAs）。
 
     返回 (kind, 已保存路径或 None)。kind 供 ObjectPool 分组对应：
@@ -415,12 +415,13 @@ def _export_ole_via_com(shp, idx, no, out_dir):
         return "pkg", None
     try:
         obj = shp.OLEFormat.Object
+        base = _safe_filename(iconlabel) if iconlabel and iconlabel.strip() else "项%d_材料%d" % (idx, no)
         if kind == "excel":
-            out = os.path.join(out_dir, "项%d_材料%d.xlsx" % (idx, no))
+            out = os.path.join(out_dir, os.path.splitext(base)[0] + ".xlsx")
             obj.SaveAs(out, 51)
             return kind, out
         ext = "docx" if kind == "word_docx" else "doc"
-        out = os.path.join(out_dir, "项%d_材料%d.%s" % (idx, no, ext))
+        out = os.path.join(out_dir, os.path.splitext(base)[0] + "." + ext)
         save = getattr(obj, "SaveAs2", obj.SaveAs)
         save(out, 12 if kind == "word_docx" else 0)
         return kind, out
@@ -436,6 +437,23 @@ def _ole_kind_match(want, have):
         return have in ("word_docx", "word_native", "pkg", "file")
     # 'pkg'（通用包）可匹配任何可提取类型
     return have in ("pkg", "file", "excel", "word_docx")
+
+
+def _sniff_office_kind(content):
+    """按内容识别 package 流是 xlsx 还是 docx（zip 内 xl/ 或 word/ 目录）。"""
+    if not content or content[:2] != b"PK":
+        return "file"
+    try:
+        import io
+        import zipfile
+        names = zipfile.ZipFile(io.BytesIO(content)).namelist()
+    except Exception:
+        return "file"
+    if any(n.startswith("xl/") for n in names):
+        return "excel"
+    if any(n.startswith("word/") for n in names):
+        return "word_docx"
+    return "file"
 
 
 def _extract_ole10native(raw):
@@ -486,8 +504,12 @@ def _read_doc_object_pool(doc_path):
                 content, fname, kind = None, "", "unknown"
                 if ole.exists(["ObjectPool", name, "package"]):
                     content = ole.openstream(["ObjectPool", name, "package"]).read()
-                    kind = ("excel" if "Excel" in progid
-                            else "word_docx" if "Word" in progid else "file")
+                    if "Excel" in progid:
+                        kind = "excel"
+                    elif "Word" in progid:
+                        kind = "word_docx"
+                    else:
+                        kind = _sniff_office_kind(content)
                 elif ole.exists(["ObjectPool", name, "\x01Ole10Native"]):
                     raw = ole.openstream(["ObjectPool", name, "\x01Ole10Native"]).read()
                     fname, content = _extract_ole10native(raw)
@@ -518,7 +540,8 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
     word.DisplayAlerts = 0
     doc = None
     items = {}
-    ole_shape_items = []  # 需阶段2提取的 OLE 对象：每元素 = (考评项 idx, kind)
+    mat_records = []  # 已提取材料：(考评项 idx, 形状内序号, 文件路径)
+    ole_shape_items = []  # 需阶段2提取的 OLE 对象：每元素 = (考评项 idx, kind, 形状内序号, iconlabel文件名)
     try:
         doc = word.Documents.Open(doc_path)
         tb = doc.Tables(1)
@@ -541,23 +564,25 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
             mat_txt = (mat_cell.Range.Text.replace("\x07", "")
                        .replace("\r", "").replace("\x01", "").strip())
             items[idx]["material_text"] = mat_txt
-            pic_no = 0
-            ole_no = 0
+            mat_no = 0
             for s in list(mat_cell.Range.InlineShapes):
+                mat_no += 1
                 if s.Type == 3:  # 图片
-                    pic_no += 1
-                    out = os.path.join(out_dir, "项%d_图%d.png" % (idx, pic_no))
+                    out = os.path.join(out_dir, "项%d_图%d.png" % (idx, mat_no))
                     if _export_inline_picture(s, out):
-                        items[idx]["materials"].append(out)
+                        mat_records.append((idx, mat_no, out))
                     else:
-                        warnings.append("第 %d 项第 %d 张图片提取失败" % (idx, pic_no))
+                        warnings.append("第 %d 项第 %d 张图片提取失败" % (idx, mat_no))
                 else:            # OLE 对象：原生 Office 尝试 COM 导出，其余交阶段2
-                    ole_no += 1
-                    _kind, saved = _export_ole_via_com(s, idx, ole_no, out_dir)
+                    try:
+                        _label = s.OLEFormat.IconLabel or ""
+                    except Exception:
+                        _label = ""
+                    _kind, saved = _export_ole_via_com(s, idx, mat_no, out_dir, _label)
                     if saved:
-                        items[idx]["materials"].append(saved)
+                        mat_records.append((idx, mat_no, saved))
                     else:
-                        ole_shape_items.append((idx, _kind))
+                        ole_shape_items.append((idx, _kind, mat_no, _label))
             if progress_cb:
                 try:
                     progress_cb(idx)
@@ -571,43 +596,75 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
                 pass
         word.Quit()
 
-    # ---- 阶段2：olefile 提取未由 COM 导出的 OLE 内嵌文件（按 kind 分组顺序对应）----
+    # ---- 阶段2：olefile 提取未由 COM 导出的 OLE 内嵌文件 ----
     try:
         entries = _read_doc_object_pool(doc_path)
     except Exception as e:
         warnings.append("OLE 材料解析失败：" + str(e))
         entries = []
     if entries and ole_shape_items:
-        unused = [pos for pos in range(len(entries)) if entries[pos][2]]
-        counters = {}
-        for idx, want_kind in ole_shape_items:
+        # 本工具生成的文档包含原生 Word OLE（word_native/word_docx），其 ObjectPool 中
+        # Excel 条目顺序与文档形状顺序相反（多份实测一致）；原版手工文档均为
+        # Package(Ole10Native)/Excel(package流)，顺序一致，按正序对应。
+        has_native_ole = any(entries[p][1] in ("word_native", "word_docx")
+                             for p in range(len(entries)))
+        excel_shapes = [r for r in ole_shape_items if r[1] == "excel"]
+        excel_entries = [p for p in range(len(entries))
+                         if entries[p][1] == "excel" and entries[p][2]]
+        if has_native_ole:
+            excel_entries = list(reversed(excel_entries))
+        used = set()
+        if excel_shapes:
+            for (idx, _kind, mat_no, label), epos in zip(excel_shapes, excel_entries):
+                if epos in used:
+                    continue
+                used.add(epos)
+                _ename, kind, content, fname = entries[epos]
+                base = (os.path.splitext(_safe_filename(label))[0]
+                        if label and label.strip() else "项%d_材料%d" % (idx, mat_no))
+                out = os.path.join(out_dir, base + ".xlsx")
+                try:
+                    with open(out, "wb") as f:
+                        f.write(content)
+                    mat_records.append((idx, mat_no, out))
+                except Exception as e:
+                    warnings.append("第 %d 项材料保存失败：%s" % (idx, e))
+        # 其余类型（Package 等）按顺序对应
+        for idx, want_kind, mat_no, label in ole_shape_items:
+            if want_kind == "excel":
+                continue
             chosen = None
-            for pos in unused:
+            for pos in range(len(entries)):
+                if pos in used or not entries[pos][2]:
+                    continue
                 if _ole_kind_match(want_kind, entries[pos][1]):
                     chosen = pos
                     break
             if chosen is None:
                 warnings.append("第 %d 项 OLE 材料未能对应到内嵌文件" % idx)
                 continue
-            unused.remove(chosen)
+            used.add(chosen)
             _ename, kind, content, fname = entries[chosen]
-            counters[idx] = counters.get(idx, 0) + 1
-            if kind == "excel":
-                fname_out = "项%d_材料%d.xlsx" % (idx, counters[idx])
+            if label and label.strip():
+                fname_out = _safe_filename(label)
             elif kind == "word_docx":
-                fname_out = "项%d_材料%d.docx" % (idx, counters[idx])
+                fname_out = "项%d_材料%d.docx" % (idx, mat_no)
             else:
-                base = os.path.basename(fname) or "项%d_材料%d" % (idx, counters[idx])
+                base = os.path.basename(fname) or "项%d_材料%d" % (idx, mat_no)
                 fname_out = base if os.path.splitext(base)[1] else base + ".bin"
             out = os.path.join(out_dir, _safe_filename(fname_out))
             try:
                 with open(out, "wb") as f:
                     f.write(content)
-                items[idx]["materials"].append(out)
+                mat_records.append((idx, mat_no, out))
             except Exception as e:
                 warnings.append("第 %d 项材料保存失败：%s" % (idx, e))
-        if unused:
-            warnings.append("有 %d 个内嵌文件未对应到考评项（可能为文档中其他位置对象）" % len(unused))
+
+    # 按形状内序号归并材料（保持原文档中图片/文件的先后顺序）
+    for idx in range(1, 13):
+        items[idx]["materials"] = [p for _i, _n, p in
+                                   sorted((r for r in mat_records if r[0] == idx),
+                                          key=lambda r: r[1])]
 
     return {"name": name, "month": month, "items": items, "warnings": warnings}
 

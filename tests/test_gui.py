@@ -114,7 +114,7 @@ def test_app_build_layout():
         root, app = _new_app(tmp)
         try:
             assert len(app.items_widgets) == 12
-            assert hasattr(app, "import_label")        # v1.3.0 读取已生成考评表(.doc)
+            assert hasattr(app, "import_label")        # v1.1.2 读取已生成考评表(.doc)
             assert not hasattr(app, "ref_label")
             assert not hasattr(app, "ref_materials")
             bottom = app.btn_generate.master           # “一键生成”最先布局，缩小不被遮挡

@@ -230,6 +230,33 @@ def test_safe_filename():
     assert kc._safe_filename("   ") == "未命名"
 
 
+def test_sniff_office_kind():
+    # xlsx：zip 内含 xl/
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", "")
+        z.writestr("xl/workbook.xml", "")
+    assert kc._sniff_office_kind(buf.getvalue()) == "excel"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", "")
+        z.writestr("word/document.xml", "")
+    assert kc._sniff_office_kind(buf.getvalue()) == "word_docx"
+    assert kc._sniff_office_kind(b"D0CF11E0A1B11AE1") == "file"
+    assert kc._sniff_office_kind(b"") == "file"
+    assert kc._sniff_office_kind(None) == "file"
+
+
+def test_ole_kind_match():
+    assert kc._ole_kind_match("excel", "excel") is True
+    assert kc._ole_kind_match("excel", "file") is True
+    assert kc._ole_kind_match("excel", "pkg") is False
+    assert kc._ole_kind_match("word_docx", "pkg") is True
+    assert kc._ole_kind_match("pkg", "excel") is True
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
