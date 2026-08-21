@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.1.3（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员履职考评表生成核心逻辑 v1.1.4（兼容 Windows 7 SP1 ~ Windows 11）"""
 
 import json
 import logging
@@ -257,17 +257,15 @@ XLSX_ITEM_KEYWORDS = {
 }
 
 
-def read_eval_scores(xlsx_path, name):
-    """从月度履职履责表 xlsx 读取指定姓名安全员的 12 项评分与扣分说明。
+def _norm_cell(v):
+    """规范化表格单元格值：去空白（含换行）。"""
+    return "".join(str(v).split()) if v is not None else ""
 
-    返回 {"name": 姓名, "items": {1..12: {"score": str, "desc": str}},
-           "total": 总分(str 或 "")}。
-    未找到 sheet / 表头 / 姓名时抛出 ValueError 并附可用信息。
-    """
+
+def _locate_eval_sheet(xlsx_path):
+    """定位履职履责表 xlsx 的结构，返回 (sheet, header_row, name_col, total_col, item_cols)。
+    sheet / 表头 / 考评项缺失时抛出 ValueError 并附可用信息。"""
     import openpyxl
-
-    def _norm(v):
-        return "".join(str(v).split()) if v is not None else ""
 
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
     sheet = None
@@ -283,7 +281,7 @@ def read_eval_scores(xlsx_path, name):
     # 1) 表头行：含「扣分说明」的行
     header_row = None
     for r in range(1, min(sheet.max_row, 8) + 1):
-        if any("扣分说明" in _norm(sheet.cell(row=r, column=c).value)
+        if any("扣分说明" in _norm_cell(sheet.cell(row=r, column=c).value)
                for c in range(1, sheet.max_column + 1)):
             header_row = r
             break
@@ -294,7 +292,7 @@ def read_eval_scores(xlsx_path, name):
     name_col, total_col = None, None
     for r in range(1, header_row):
         for c in range(1, sheet.max_column + 1):
-            h = _norm(sheet.cell(row=r, column=c).value)
+            h = _norm_cell(sheet.cell(row=r, column=c).value)
             if h == "姓名" and name_col is None:
                 name_col = c
             if "得分" in h and total_col is None:
@@ -303,7 +301,7 @@ def read_eval_scores(xlsx_path, name):
         name_col = 4  # 兜底：D 列
 
     # 3) 项名列：表头按关键词匹配 12 个考评项
-    header_vals = {c: _norm(sheet.cell(row=header_row, column=c).value)
+    header_vals = {c: _norm_cell(sheet.cell(row=header_row, column=c).value)
                    for c in range(1, sheet.max_column + 1)}
     item_cols = {}
     for idx in range(1, 13):
@@ -314,6 +312,30 @@ def read_eval_scores(xlsx_path, name):
             raise ValueError("表头中未找到第 %d 项「%s」，文件格式可能已变化"
                              % (idx, ITEM_MATCH_RULES[idx][0]))
         item_cols[idx] = hit[0]
+    return sheet, header_row, name_col, total_col, item_cols
+
+
+def list_eval_names(xlsx_path):
+    """返回履职履责表 xlsx 中可用的姓名列表（去重，供界面下拉选择）。"""
+    sheet, header_row, name_col, _total, _items = _locate_eval_sheet(xlsx_path)
+    names = []
+    for r in range(header_row + 1, sheet.max_row + 1):
+        nm = sheet.cell(row=r, column=name_col).value
+        if nm is not None and str(nm).strip():
+            nm = str(nm).strip()
+            if nm not in names:
+                names.append(nm)
+    return names
+
+
+def read_eval_scores(xlsx_path, name):
+    """从月度履职履责表 xlsx 读取指定姓名安全员的 12 项评分与扣分说明。
+
+    返回 {"name": 姓名, "items": {1..12: {"score": str, "desc": str}},
+           "total": 总分(str 或 "")}。
+    未找到 sheet / 表头 / 姓名时抛出 ValueError 并附可用信息。
+    """
+    sheet, header_row, name_col, total_col, item_cols = _locate_eval_sheet(xlsx_path)
 
     # 4) 定位姓名行
     person_row, names = None, []
@@ -333,10 +355,10 @@ def read_eval_scores(xlsx_path, name):
     items = {}
     for idx, col in item_cols.items():
         items[idx] = {
-            "score": _norm(sheet.cell(row=person_row, column=col).value),
-            "desc": _norm(sheet.cell(row=person_row, column=col + 1).value),
+            "score": _norm_cell(sheet.cell(row=person_row, column=col).value),
+            "desc": _norm_cell(sheet.cell(row=person_row, column=col + 1).value),
         }
-    total = _norm(sheet.cell(row=person_row, column=total_col).value) if total_col else ""
+    total = _norm_cell(sheet.cell(row=person_row, column=total_col).value) if total_col else ""
     return {"name": name.strip(), "items": items, "total": total}
 
 
@@ -371,6 +393,13 @@ def _parse_kaoping_header(header_text):
     name = _slot(body, "考评对象", "管理者姓名")
     month = _slot(body, "评价月份", "评价人员").rstrip("月").strip()
     return name, month
+
+
+def _month_from_filename(filename):
+    """从考评表文件名提取月份数字串（如「孙忠7月」→ 7），找不到返回空串。
+    用于旧版工具生成/手工填写文档中「评价月份」留空时的兜底。"""
+    m = re.search(r"(\d{1,2})月", filename or "")
+    return m.group(1) if m else ""
 
 
 def _cell_text(tb, row, col):
@@ -454,6 +483,15 @@ def _sniff_office_kind(content):
     if any(n.startswith("word/") for n in names):
         return "word_docx"
     return "file"
+
+
+def _excel_ext(content):
+    """Excel 内嵌流实际格式对应的扩展名：OLE2 魔数为 .xls，zip 为 .xlsx（兜底 .xlsx）。
+    原版文档中常有旧版 .xls 以 Excel package 流形式嵌入，误命名 .xlsx 会导致
+    Excel 报「文件格式与扩展名不匹配」而无法打开。"""
+    if content and content[:4] == _OLE_MAGIC[:4]:
+        return ".xls"
+    return ".xlsx"
 
 
 def _extract_ole10native(raw):
@@ -550,6 +588,9 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
                              % (TOTAL_ROW, tb.Rows.Count, tb.Columns.Count))
         header_text = tb.Cell(HEADER_ROW, 1).Range.Text
         name, month = _parse_kaoping_header(header_text)
+        if not month:
+            # 旧版生成的文档「评价月份」可能留空：从文件名兜底提取（如「孙忠8月」→ 8）
+            month = _month_from_filename(os.path.basename(doc_path))
         for idx in range(1, 13):
             row = ITEM_ROWS[idx]
             items[idx] = {
@@ -615,14 +656,20 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
             excel_entries = list(reversed(excel_entries))
         used = set()
         if excel_shapes:
+            if len(excel_shapes) != len(excel_entries):
+                warnings.append("Excel 材料数量与内嵌对象数不一致（形状 %d 个 / 对象 %d 个），"
+                                "部分材料可能未按正确顺序还原"
+                                % (len(excel_shapes), len(excel_entries)))
             for (idx, _kind, mat_no, label), epos in zip(excel_shapes, excel_entries):
                 if epos in used:
                     continue
                 used.add(epos)
                 _ename, kind, content, fname = entries[epos]
+                # 无 IconLabel/包内文件名时，用「考评项名_材料N」命名，便于在界面上识别归属项
                 base = (os.path.splitext(_safe_filename(label))[0]
-                        if label and label.strip() else "项%d_材料%d" % (idx, mat_no))
-                out = os.path.join(out_dir, base + ".xlsx")
+                        if label and label.strip()
+                        else "%s_材料%d" % (ITEM_MATCH_RULES[idx][0], mat_no))
+                out = os.path.join(out_dir, base + _excel_ext(content))
                 try:
                     with open(out, "wb") as f:
                         f.write(content)

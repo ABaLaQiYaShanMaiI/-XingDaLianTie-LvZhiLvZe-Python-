@@ -196,6 +196,37 @@ def test_read_eval_scores():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_list_eval_names():
+    tmp, p = _make_fake_lvzhilv()
+    try:
+        assert kc.list_eval_names(p) == ["孙忠", "王旺"]
+        # 无目标 sheet 时同样报错
+        import openpyxl
+        bad = os.path.join(tmp, "其他.xlsx")
+        wb = openpyxl.Workbook()
+        wb.active.title = "其他表"
+        wb.save(bad)
+        try:
+            kc.list_eval_names(bad)
+            assert False, "应抛出 ValueError"
+        except ValueError as e:
+            assert "sheet" in str(e)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_month_from_filename():
+    assert kc._month_from_filename("安全员安全生产责任制履职清单考评表(孙忠8月).doc") == "8"
+    assert kc._month_from_filename("班组长安全生产责任制履职清单考评表（季忠7月）.doc") == "7"
+    assert kc._month_from_filename("模板.doc") == ""
+
+
+def test_excel_ext():
+    assert kc._excel_ext(b"PK\x03\x04xxxx") == ".xlsx"        # xlsx 内容
+    assert kc._excel_ext(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") == ".xls"   # 旧版 xls 内容
+    assert kc._excel_ext(b"") == ".xlsx"
+
+
 def test_parse_kaoping_header():
     hdr = "考评对象（安全员）：孙忠  管理者姓名：（手签）评价月份：7月评价人员签字：（手签）\r\x07"
     name, month = kc._parse_kaoping_header(hdr)

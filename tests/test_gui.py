@@ -267,6 +267,37 @@ def test_apply_kaoping_doc_fill():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_eval_scores_fill():
+    """读取履职履责表(xlsx)：姓名列表写入下拉、12 项评分/描述回填、状态栏显示总分。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        fake = os.path.join(tmp, "履职履责.xlsx")
+        open(fake, "w").close()
+        orig_list, orig_read = kc.list_eval_names, kc.read_eval_scores
+        kc.list_eval_names = lambda p: ["孙忠", "王旺"]
+        kc.read_eval_scores = lambda p, name: {
+            "name": name, "total": "90",
+            "items": {i: {"score": "20", "desc": "描述%d" % i} for i in range(1, 13)},
+        }
+        try:
+            root, app = _new_app(tmp)
+            try:
+                app._pick_eval_name = lambda names: "王旺"     # 当前姓名为空 → 走选择框
+                app._read_eval_scores(fake)
+                assert app.name_var.get() == "王旺"
+                assert list(app.name_combo["values"]) == ["孙忠", "王旺"]
+                assert app.items_widgets[0].score_var.get() == "20"
+                assert app.items_widgets[0].desc_var.get() == "描述1"
+                assert app.items_widgets[11].score_var.get() == "20"
+                assert "90" in app.status_var.get()
+            finally:
+                root.destroy()
+        finally:
+            kc.list_eval_names, kc.read_eval_scores = orig_list, orig_read
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

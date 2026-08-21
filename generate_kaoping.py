@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.3（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.4（兼容 Windows 7 SP1 ~ Windows 11）"""
 import logging
 import os
 import sys
@@ -18,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),
@@ -257,8 +257,10 @@ class ImageItem:
         if path and os.path.exists(path):
             try:
                 os.startfile(path)
-            except Exception:
-                pass
+            except Exception as e:
+                messagebox.showwarning(
+                    "无法打开材料",
+                    "无法打开该材料文件：\n%s\n\n%s" % (path, e))
 
     def _refresh_previews(self):
         for w in self.thumb_frame.winfo_children():
@@ -427,6 +429,23 @@ class App:
                 "（图片、Excel、Word 等），回填界面后可替换材料、改月份再生成新表。\n"
                 "提取出的材料保存到「输出目录\\提取材料」。")
         ttk.Button(r4, text="读取考评表", width=9, command=self._read_kaoping_doc).pack(side=tk.LEFT, padx=2)
+
+        r5 = ttk.Frame(mat)
+        r5.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(r5, text="履职履责表:").pack(side=tk.LEFT)
+        self.eval_label = tk.Label(
+            r5, text="选择月度履职履责表(.xlsx)，自动填入 12 项自评得分与描述（扣分说明）",
+            bg=C_INPUT_BG, fg=C_HINT_FG, relief=tk.GROOVE, cursor="hand2")
+        self.eval_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.eval_label.bind("<Button-1>", lambda e: self._read_eval_scores())
+        self.eval_label.drop_target_register(DND_FILES)
+        self.eval_label.dnd_bind("<<Drop>>", self._drop_eval_scores)
+        ToolTip(self.eval_label,
+                "读取月度履职履责表（.xlsx）：\n"
+                "按「安全员月度履职评价表」sheet 读取所选安全员的 12 项评分与扣分说明，\n"
+                "自动填入各考评项的「自评得分」与「自评描述」。\n"
+                "文件中包含多个姓名时，会弹出对话框让您选择本次生成的安全员。")
+        ttk.Button(r5, text="读取评分", width=9, command=self._read_eval_scores).pack(side=tk.LEFT, padx=2)
 
         # ---- 中部：12 项滚动列表 ----
         mid_lf = ttk.LabelFrame(outer, text=" ③ 考评项填写（12 项；每项可拖入图片 / Word / Excel / PDF 等支撑材料） ", padding=4)
@@ -631,6 +650,86 @@ class App:
         self.status_var.set(msg)
         if data.get("warnings"):
             messagebox.showwarning("读取提示", "\n".join(data["warnings"]))
+
+    # ============ 月度履职履责表(xlsx) 评分读取 ============
+    def _read_eval_scores(self, path=None):
+        """读取履职履责表 .xlsx：按姓名把 12 项评分/扣分说明填入「自评得分/自评描述」。"""
+        if not path:
+            path = filedialog.askopenfilename(
+                title="选择月度履职履责表",
+                filetypes=[("Excel 工作簿", "*.xlsx;*.xlsm"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            names = kc.list_eval_names(path)
+        except Exception as e:
+            logging.error("读取履职履责表失败: %s", e)
+            messagebox.showerror("读取失败", str(e))
+            return
+        if not names:
+            messagebox.showwarning("提示", "履职履责表中未找到姓名行")
+            return
+        self.name_combo["values"] = names
+        cur = self.name_var.get().strip()
+        if cur not in names:
+            if len(names) == 1:
+                cur = names[0]
+            else:
+                cur = self._pick_eval_name(names)
+                if not cur:
+                    return
+            self.name_var.set(cur)
+        try:
+            data = kc.read_eval_scores(path, cur)
+        except Exception as e:
+            logging.error("读取履职履责表评分失败: %s", e)
+            messagebox.showwarning("读取失败", str(e))
+            return
+        filled = 0
+        for idx, it in (data.get("items") or {}).items():
+            w = self.items_widgets[idx - 1]
+            if it.get("score"):
+                w.score_var.set(it["score"])
+                filled += 1
+            if it.get("desc"):
+                w.desc_var.set(it["desc"])
+        self.eval_label.config(text=os.path.basename(path), fg=C_OK_FG)
+        msg = "已读取 %s 的履职履责表：%d 项评分/描述已填入" % (cur, filled)
+        total = data.get("total") or ""
+        if total:
+            msg += "，总分 %s" % total
+        self.status_var.set(msg)
+
+    def _drop_eval_scores(self, event):
+        for p in self.root.tk.splitlist(event.data):
+            if os.path.isfile(p) and p.lower().endswith((".xlsx", ".xlsm", ".xls")):
+                self._read_eval_scores(p)
+                return
+
+    def _pick_eval_name(self, names):
+        """履职履责表含多个姓名时弹出选择框，返回选中姓名或 None。"""
+        win = tk.Toplevel(self.root)
+        win.title("选择姓名")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        ttk.Label(win, text="履职履责表中包含多个安全员，请选择本次生成的姓名：",
+                  padding=(14, 10)).pack()
+        var = tk.StringVar(value=names[0])
+        combo = ttk.Combobox(win, textvariable=var, values=list(names),
+                             state="readonly", width=14)
+        combo.pack(padx=14, pady=(0, 10))
+        result = {}
+
+        def _ok():
+            result["v"] = var.get()
+            win.destroy()
+
+        ttk.Button(win, text="确定", command=_ok).pack(pady=(0, 12))
+        win.bind("<Return>", lambda e: _ok())
+        win.after(100, combo.focus_set)
+        self.root.wait_window(win)
+        return result.get("v")
 
     # ============ 文件名权重配置 ============
     def _open_material_rules(self):
