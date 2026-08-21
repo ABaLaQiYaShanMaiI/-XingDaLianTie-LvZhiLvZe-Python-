@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.0.4"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.0（兼容 Windows 7 SP1 ~ Windows 11）"""
 import logging
 import os
 import sys
@@ -18,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "1.0.4"
+VERSION = "1.1.0"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),
@@ -48,9 +48,13 @@ THUMB_SIZE = (90, 90)
 def _setup_logging():
     """日志写入程序同目录 kaoping.log，便于生成失败等问题的排查。"""
     try:
+        # 用显式 FileHandler(encoding=...) 而非 basicConfig(encoding=...)：
+        # 后者是 Python 3.9 才支持的参数，Win7 构建(Python 3.8) 会抛 TypeError 导致无日志。
+        handler = logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8")
         logging.basicConfig(
-            filename=LOG_PATH, level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            handlers=[handler])
     except Exception:
         pass
 

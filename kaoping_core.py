@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.0.4"""
+"""安全员履职考评表生成核心逻辑 v1.1.0（兼容 Windows 7 SP1 ~ Windows 11）"""
 
 import json
 import os
@@ -504,7 +504,9 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
                 pass
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        doc.SaveAs2(os.path.abspath(output_path), 0)
+        # SaveAs2 是 Word 2010+ 的方法；Word 2007 机器自动回退 SaveAs，兼容性更好
+        save_as = getattr(doc, "SaveAs2", doc.SaveAs)
+        save_as(os.path.abspath(output_path), 0)
     finally:
         if doc is not None:
             try:

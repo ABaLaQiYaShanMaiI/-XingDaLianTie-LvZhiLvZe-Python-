@@ -4,11 +4,17 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.venv*/
 
 # PyInstaller 构建产物
 build/
 dist/
 *.spec.bak
+_build_*.log
+_build_*.err
+_pip*.log
+_pip*.err
+_tmp_check/
 
 # 程序运行产物
 kaoping_config.json
