@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.2（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.3（兼容 Windows 7 SP1 ~ Windows 11）"""
 import logging
 import os
 import sys
@@ -18,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),
@@ -43,6 +43,61 @@ else:
 CONFIG_PATH = os.path.join(BASE_DIR, "kaoping_config.json")
 LOG_PATH = os.path.join(BASE_DIR, "kaoping.log")
 THUMB_SIZE = (90, 90)
+
+# ---- 界面配色（统一柔和中性色，减少视觉杂乱）----
+C_INPUT_BG = "#F3F6FA"   # 可点击 / 可拖拽区域的底色
+C_HINT_FG = "#5A6472"    # 提示文字颜色
+C_OK_FG = "#1E7D3C"      # 成功 / 已定位
+C_ERR_FG = "#C0392B"     # 失败 / 错误
+
+
+class ToolTip:
+    """简易悬停提示（纯 tkinter 实现，兼容 Windows 7/8/10/11）。"""
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self._tip = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._hide()
+        self._after_id = self.widget.after(350, self._show)
+
+    def _show(self):
+        self._after_id = None
+        if self._tip is not None:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+            self._tip = tk.Toplevel(self.widget)
+            self._tip.wm_overrideredirect(True)
+            self._tip.wm_geometry("+%d+%d" % (x, y))
+            label = tk.Label(self._tip, text=self.text, justify=tk.LEFT,
+                             bg="#FFFFF0", fg="#333", relief=tk.SOLID,
+                             borderwidth=1, font=("Microsoft YaHei", 9),
+                             padx=8, pady=5, wraplength=430)
+            label.pack()
+        except Exception:
+            pass
+
+    def _hide(self, _event=None):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
 
 
 def _setup_logging():
@@ -91,48 +146,65 @@ class ImageItem:
         self.material_paths = []
         self._thumb_refs = []
 
-        self.frame = ttk.LabelFrame(parent, text=f"  {index}、{title}（标准分 {std_score}分） ", padding=6)
+        self.frame = ttk.LabelFrame(parent, text=f"  {index}、{title}（标准分 {std_score} 分） ", padding=6)
         self.frame.pack(fill=tk.X, pady=4)
 
         grid = ttk.Frame(self.frame)
         grid.pack(fill=tk.X)
 
-        # 第一行：自评描述
-        ttk.Label(grid, text="自评描述:").grid(row=0, column=0, sticky="e", padx=2, pady=2)
+        # 第一行：自评描述 / 自评得分 / 材料说明（两行同列对齐，得分旁标注有效范围）
+        ttk.Label(grid, text="自评描述:").grid(row=0, column=0, sticky="e", padx=(2, 6), pady=2)
         self.desc_var = tk.StringVar()
-        self.desc_entry = ttk.Entry(grid, textvariable=self.desc_var, width=45)
+        self.desc_entry = ttk.Entry(grid, textvariable=self.desc_var, width=42)
         self.desc_entry.grid(row=0, column=1, sticky="we", padx=2, pady=2)
-        ttk.Label(grid, text="自评得分:").grid(row=0, column=2, sticky="e", padx=(8, 2))
+        ToolTip(self.desc_entry, "自评描述：本项工作完成情况的自我说明，将写入考评表「自评描述」栏。")
+
+        ttk.Label(grid, text="自评得分:").grid(row=0, column=2, sticky="e", padx=(10, 4), pady=2)
         self.score_var = tk.StringVar(value=str(std_score))
-        self.score_entry = ttk.Entry(grid, textvariable=self.score_var, width=6)
+        self.score_entry = ttk.Entry(grid, textvariable=self.score_var, width=5)
         self.score_entry.grid(row=0, column=3, padx=2, pady=2)
-        ttk.Label(grid, text="材料说明:").grid(row=0, column=4, sticky="e", padx=(8, 2))
+        ttk.Label(grid, text=f"0~{std_score} 分", foreground="#8A94A6").grid(row=0, column=4, sticky="w", padx=(0, 10))
+        ToolTip(self.score_entry, f"自评得分：0~{std_score} 分（默认已填标准分，可修改或留空）。")
+
+        ttk.Label(grid, text="材料说明:").grid(row=0, column=5, sticky="e", padx=(4, 6), pady=2)
         self.mat_var = tk.StringVar()
-        self.mat_entry = ttk.Entry(grid, textvariable=self.mat_var, width=20)
-        self.mat_entry.grid(row=0, column=5, sticky="we", padx=2, pady=2)
+        self.mat_entry = ttk.Entry(grid, textvariable=self.mat_var, width=16)
+        self.mat_entry.grid(row=0, column=6, sticky="we", padx=2, pady=2)
+        ToolTip(self.mat_entry, "材料说明：本项支撑材料的文字说明（如文件名称或内容摘要），将写入考评表「材料」栏。")
 
-        # 第二行：评价描述/上级评分
-        ttk.Label(grid, text="评价描述:").grid(row=1, column=0, sticky="e", padx=2, pady=2)
+        # 第二行：评价描述 / 上级评分（与第一行保持同列对齐）
+        ttk.Label(grid, text="评价描述:").grid(row=1, column=0, sticky="e", padx=(2, 6), pady=2)
         self.eval_var = tk.StringVar()
-        self.eval_entry = ttk.Entry(grid, textvariable=self.eval_var, width=45)
+        self.eval_entry = ttk.Entry(grid, textvariable=self.eval_var, width=42)
         self.eval_entry.grid(row=1, column=1, sticky="we", padx=2, pady=2)
-        ttk.Label(grid, text="上级评分:").grid(row=1, column=2, sticky="e", padx=(8, 2))
-        self.super_var = tk.StringVar()
-        self.super_entry = ttk.Entry(grid, textvariable=self.super_var, width=6)
-        self.super_entry.grid(row=1, column=3, padx=2, pady=2)
+        ToolTip(self.eval_entry, "评价描述：上级 / 安环部对本项工作的评价意见，将写入考评表「评价描述」栏。")
 
-        # 第三行：材料拖拽区（图片/文档/表格均可）
+        ttk.Label(grid, text="上级评分:").grid(row=1, column=2, sticky="e", padx=(10, 4), pady=2)
+        self.super_var = tk.StringVar()
+        self.super_entry = ttk.Entry(grid, textvariable=self.super_var, width=5)
+        self.super_entry.grid(row=1, column=3, padx=2, pady=2)
+        ttk.Label(grid, text=f"0~{std_score} 分", foreground="#8A94A6").grid(row=1, column=4, sticky="w", padx=(0, 10))
+        ToolTip(self.super_entry, f"上级评分：上级 / 安环部评分，0~{std_score} 分，可留空。")
+
+        # 第三行：支撑材料拖拽区
         img_row = ttk.Frame(self.frame)
         img_row.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(img_row, text="支撑材料:").pack(side=tk.LEFT, padx=(2, 4))
+        ttk.Label(img_row, text="支撑材料:").pack(side=tk.LEFT, padx=(2, 6))
         self.drop_label = tk.Label(
-            img_row, text=f"拖入材料到此（图片/文档/表格等，最多{self.MAX_MATERIALS}个）或点击选择；双击预览打开，右键删除单个，悬停显示完整文件名",
-            bg="#E8F0FE", fg="#666", relief=tk.GROOVE,
+            img_row,
+            text=f"点击选择或拖入材料（最多 {self.MAX_MATERIALS} 个）\n支持图片 / Word / Excel / PDF；双击预览，右键删除，悬停显示完整文件名",
+            bg=C_INPUT_BG, fg=C_HINT_FG, relief=tk.GROOVE,
             height=2, cursor="hand2")
         self.drop_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.drop_label.bind("<Button-1>", lambda e: self._choose_materials())
         self.drop_label.drop_target_register(DND_FILES)
         self.drop_label.dnd_bind("<<Drop>>", self._on_drop)
+        ToolTip(self.drop_label,
+                f"为「{index}、{title}」添加支撑材料：\n"
+                f"· 点击选择或拖入文件，最多 {self.MAX_MATERIALS} 个\n"
+                "· 双击材料预览并打开原文件\n"
+                "· 右键删除单个材料\n"
+                "· 鼠标悬停显示完整文件名")
         self.btn_add = ttk.Button(img_row, text="选择材料", command=self._choose_materials)
         self.btn_add.pack(side=tk.LEFT, padx=2)
         self.btn_clear = ttk.Button(img_row, text="清空材料", command=self._clear_materials)
@@ -143,7 +215,7 @@ class ImageItem:
         self.thumb_frame.pack(fill=tk.X, pady=(4, 0))
 
         grid.columnconfigure(1, weight=3)
-        grid.columnconfigure(5, weight=2)
+        grid.columnconfigure(6, weight=2)
 
     def _on_drop(self, event):
         files = self.root.tk.splitlist(event.data)
@@ -258,76 +330,106 @@ class App:
 
     # ============ 界面构建 ============
     def _build_ui(self):
-        outer = ttk.Frame(self.root, padding=8)
+        outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # ---- 顶部：基本信息 ----
-        top = ttk.LabelFrame(outer, text=" 基本信息 ", padding=8)
+        # ================= ① 基本信息与输出 =================
+        top = ttk.LabelFrame(outer, text=" ① 基本信息与输出 ", padding=8)
         top.pack(fill=tk.X, pady=(0, 6))
 
-        r1 = ttk.Frame(top); r1.pack(fill=tk.X, pady=2)
+        r1 = ttk.Frame(top)
+        r1.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(r1, text="年份:").pack(side=tk.LEFT)
         self.year_var = tk.StringVar(value=str(datetime.now().year))
-        ttk.Spinbox(r1, from_=2020, to=2040, textvariable=self.year_var, width=6).pack(side=tk.LEFT, padx=(2, 12))
+        ttk.Spinbox(r1, from_=2020, to=2040, textvariable=self.year_var, width=6).pack(side=tk.LEFT, padx=(2, 10))
         ttk.Label(r1, text="月份:").pack(side=tk.LEFT)
         self.month_var = tk.StringVar(value=str(datetime.now().month))
-        ttk.Spinbox(r1, from_=1, to=12, textvariable=self.month_var, width=5).pack(side=tk.LEFT, padx=(2, 12))
+        ttk.Spinbox(r1, from_=1, to=12, textvariable=self.month_var, width=5).pack(side=tk.LEFT, padx=(2, 10))
         ttk.Label(r1, text="姓名:").pack(side=tk.LEFT)
         self.name_var = tk.StringVar()
         self.name_combo = ttk.Combobox(r1, textvariable=self.name_var, width=10)
-        self.name_combo.pack(side=tk.LEFT, padx=(2, 12))
+        self.name_combo.pack(side=tk.LEFT, padx=(2, 10))
         ttk.Label(r1, text="命名模板:").pack(side=tk.LEFT)
         self.pattern_var = tk.StringVar(value=self.cfg.get("pattern", kc.DEFAULT_NAME_PATTERN))
-        ttk.Entry(r1, textvariable=self.pattern_var, width=40).pack(side=tk.LEFT, padx=(2, 8))
-        ttk.Label(r1, text="(占位符: {Y}年 {X}月 {XXX}姓名)").pack(side=tk.LEFT)
+        pattern_entry = ttk.Entry(r1, textvariable=self.pattern_var, width=38)
+        pattern_entry.pack(side=tk.LEFT, padx=(2, 4))
+        ToolTip(pattern_entry,
+                "输出文件名模板：\n"
+                "示例：2026年8月张三安全员履职考评表\n\n"
+                "占位符说明：\n"
+                "{Y} 或 {年}     = 年份\n"
+                "{X} 或 {月份}   = 月份\n"
+                "{XXX} 或 {姓名} = 姓名\n\n"
+                "可自由组合，修改后会自动保存记忆。")
+        ttk.Label(r1, text="（{Y}=年 {X}=月 {XXX}=姓名）",
+                  foreground="#8A94A6").pack(side=tk.LEFT, padx=(4, 0))
 
-        r3 = ttk.Frame(top); r3.pack(fill=tk.X, pady=2)
-        ttk.Label(r3, text="模板文件:").pack(side=tk.LEFT)
+        r2 = ttk.Frame(top)
+        r2.pack(fill=tk.X)
+        ttk.Label(r2, text="考评表模板:").pack(side=tk.LEFT)
         self.tpl_var = tk.StringVar()
-        self.tpl_label = tk.Label(r3, text="自动定位", bg="#E8F0FE", fg="#555",
+        self.tpl_label = tk.Label(r2, text="自动定位模板…", bg=C_INPUT_BG, fg=C_HINT_FG,
                                   relief=tk.GROOVE, cursor="hand2")
-        self.tpl_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.tpl_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 2))
         self.tpl_label.bind("<Button-1>", lambda e: self._sel_template())
         self.tpl_label.drop_target_register(DND_FILES)
         self.tpl_label.dnd_bind("<<Drop>>", self._drop_template)
-        ttk.Button(r3, text="选择", width=8, command=self._sel_template).pack(side=tk.LEFT, padx=2)
-        ttk.Label(r3, text="输出目录:").pack(side=tk.LEFT, padx=(12, 2))
+        ToolTip(self.tpl_label,
+                "考评表模板（.doc）：点击选择或直接拖入模板文件。\n"
+                "程序默认已自动定位到程序目录下的模板，一般无需修改。")
+        ttk.Button(r2, text="选择", width=7, command=self._sel_template).pack(side=tk.LEFT, padx=2)
+        ttk.Label(r2, text="输出目录:").pack(side=tk.LEFT, padx=(12, 2))
         self.out_var = tk.StringVar(value=self.cfg.get("out_dir", BASE_DIR))
-        self.out_label = tk.Label(r3, text=self.out_var.get(), bg="#FCE4D6", fg="#555",
+        self.out_label = tk.Label(r2, text=self.out_var.get(), bg=C_INPUT_BG, fg=C_HINT_FG,
                                   relief=tk.GROOVE, cursor="hand2")
-        self.out_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.out_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 2))
         self.out_label.bind("<Button-1>", lambda e: self._sel_outdir())
-        ttk.Button(r3, text="选择", width=8, command=self._sel_outdir).pack(side=tk.LEFT, padx=2)
+        ToolTip(self.out_label,
+                "输出目录：生成后的 .doc 考评表保存位置，点击可重新选择。\n"
+                "读取已生成考评表时，提取出的支撑材料会保存到「输出目录\\提取材料」。")
+        ttk.Button(r2, text="选择", width=7, command=self._sel_outdir).pack(side=tk.LEFT, padx=2)
 
-        # ---- 第4行：支撑材料文件夹自动匹配 ----
-        r4 = ttk.Frame(top); r4.pack(fill=tk.X, pady=2)
-        ttk.Label(r4, text="支撑材料文件夹:").pack(side=tk.LEFT)
+        # ================= ② 材料导入（可选） =================
+        mat = ttk.LabelFrame(outer, text=" ② 材料导入（可选） ", padding=8)
+        mat.pack(fill=tk.X, pady=(0, 6))
+
+        r3 = ttk.Frame(mat)
+        r3.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(r3, text="支撑材料文件夹:").pack(side=tk.LEFT)
         self.mat_folder_label = tk.Label(
-            r4, text="选择当月文件夹或年度根目录(如…\\2026)，按文件名权重自动匹配12个考评项",
-            bg="#E8F0FE", fg="#555", relief=tk.GROOVE, cursor="hand2")
+            r3, text="选择当月文件夹或年度根目录，按文件名权重自动匹配 12 个考评项",
+            bg=C_INPUT_BG, fg=C_HINT_FG, relief=tk.GROOVE, cursor="hand2")
         self.mat_folder_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.mat_folder_label.bind("<Button-1>", lambda e: self._load_material_folder())
         self.mat_folder_label.drop_target_register(DND_FILES)
         self.mat_folder_label.dnd_bind("<<Drop>>", self._drop_material_folder)
-        ttk.Button(r4, text="选择", width=8, command=self._load_material_folder).pack(side=tk.LEFT, padx=2)
-        ttk.Button(r4, text="编辑权重", width=8, command=self._open_material_rules).pack(side=tk.LEFT, padx=2)
-        ttk.Label(r4, text="(未匹配会提示；权重可本地改)").pack(side=tk.LEFT, padx=(8, 0))
+        ToolTip(self.mat_folder_label,
+                "按文件名权重把当月支撑材料自动匹配到 12 个考评项：\n"
+                "· 选择当月文件夹；或选年度根目录，程序按界面年份/月份自动定位当月（如 2026.08）\n"
+                "· 未匹配的文件会弹出提示，可手动拖入对应考评项\n"
+                "· 匹配规则保存在 material_rules.json，可用「编辑权重」查看或修改")
+        ttk.Button(r3, text="选择", width=7, command=self._load_material_folder).pack(side=tk.LEFT, padx=2)
+        ttk.Button(r3, text="编辑权重", width=9, command=self._open_material_rules).pack(side=tk.LEFT, padx=2)
 
-        # ---- 第5行：读取已生成考评表(.doc) ----
-        r5 = ttk.Frame(top); r5.pack(fill=tk.X, pady=2)
-        ttk.Label(r5, text="读取考评表:").pack(side=tk.LEFT)
+        r4 = ttk.Frame(mat)
+        r4.pack(fill=tk.X)
+        ttk.Label(r4, text="读取考评表:").pack(side=tk.LEFT)
         self.import_label = tk.Label(
-            r5, text="选择已生成的考评表(.doc)，自动读取 12 项评分/评价与支撑材料到界面，便于替换后生成新月份",
-            bg="#E8F0FE", fg="#555", relief=tk.GROOVE, cursor="hand2")
+            r4, text="选择已生成的考评表(.doc)，回填 12 项评分/评价与支撑材料，便于替换后生成新月份",
+            bg=C_INPUT_BG, fg=C_HINT_FG, relief=tk.GROOVE, cursor="hand2")
         self.import_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.import_label.bind("<Button-1>", lambda e: self._read_kaoping_doc())
         self.import_label.drop_target_register(DND_FILES)
         self.import_label.dnd_bind("<<Drop>>", self._drop_kaoping_doc)
-        ttk.Button(r5, text="读取考评表", width=10, command=self._read_kaoping_doc).pack(side=tk.LEFT, padx=2)
-        ttk.Label(r5, text="(材料提取到输出目录\\提取材料，可双击预览/右键替换)").pack(side=tk.LEFT, padx=(8, 0))
+        ToolTip(self.import_label,
+                "复用已生成的考评表（.doc）：\n"
+                "自动读取姓名/月份、12 项自评与上级评分/评价、内嵌的支撑材料\n"
+                "（图片、Excel、Word 等），回填界面后可替换材料、改月份再生成新表。\n"
+                "提取出的材料保存到「输出目录\\提取材料」。")
+        ttk.Button(r4, text="读取考评表", width=9, command=self._read_kaoping_doc).pack(side=tk.LEFT, padx=2)
 
         # ---- 中部：12 项滚动列表 ----
-        mid_lf = ttk.LabelFrame(outer, text=" 各考评项填写（可拖拽图片/文档/表格材料） ", padding=4)
+        mid_lf = ttk.LabelFrame(outer, text=" ③ 考评项填写（12 项；每项可拖入图片 / Word / Excel / PDF 等支撑材料） ", padding=4)
         mid_lf.pack(fill=tk.BOTH, expand=True)
 
         canvas = tk.Canvas(mid_lf, highlightthickness=0)
@@ -348,18 +450,21 @@ class App:
         # 鼠标滚轮：悬停在任意子控件上也能滚动中部列表
         self._bind_mousewheel(mid_lf)
 
-        # ---- 底部工具栏 ----
+        # ================= 底部工具栏 =================
         bottom = ttk.Frame(outer)
         bottom.pack(fill=tk.X, pady=(8, 0))
         # “一键生成”最先 pack 并靠右，窗口缩小也保留空间不被遮挡
         self.btn_generate = ttk.Button(bottom, text="一键生成", command=self._generate)
         self.btn_generate.pack(side=tk.RIGHT, padx=2)
+        ToolTip(self.btn_generate,
+                "校验通过后，在后台用 Word 按「命名模板」生成考评表到输出目录，\n"
+                "完成后可选择打开文件或所在文件夹。")
         ttk.Button(bottom, text="清空全部", command=self._clear_all).pack(side=tk.LEFT, padx=2)
         self.prog = ttk.Progressbar(bottom, length=260, mode="determinate")
         self.prog.pack(side=tk.LEFT, padx=10)
-        self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(bottom, textvariable=self.status_var, width=60,
-                  foreground="#555").pack(side=tk.LEFT, padx=8)
+        self.status_var = tk.StringVar(value="就绪：填写信息、导入材料后，点击右下角「一键生成」")
+        ttk.Label(bottom, textvariable=self.status_var, width=70,
+                  foreground="#5A6472").pack(side=tk.LEFT, padx=8)
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
@@ -375,23 +480,23 @@ class App:
         try:
             tpl = kc.find_template()
             self.tpl_var.set(tpl)
-            self.tpl_label.config(text=tpl, fg="#1a7f37")
+            self.tpl_label.config(text=tpl, fg=C_OK_FG)
         except FileNotFoundError as e:
             self.tpl_var.set("")
-            self.tpl_label.config(text=str(e), fg="#c0392b")
+            self.tpl_label.config(text=str(e), fg=C_ERR_FG)
 
     def _sel_template(self):
         p = filedialog.askopenfilename(title="选择考评表模板(.doc)",
                                        filetypes=[("Word 文档", "*.doc;*.docx"), ("所有文件", "*.*")])
         if p:
             self.tpl_var.set(p)
-            self.tpl_label.config(text=p, fg="#1a7f37")
+            self.tpl_label.config(text=p, fg=C_OK_FG)
 
     def _drop_template(self, event):
         files = self.root.tk.splitlist(event.data)
         if files:
             self.tpl_var.set(files[0])
-            self.tpl_label.config(text=files[0], fg="#1a7f37")
+            self.tpl_label.config(text=files[0], fg=C_OK_FG)
 
     def _sel_outdir(self):
         p = filedialog.askdirectory(title="选择输出目录")
@@ -423,7 +528,7 @@ class App:
             if sub != os.path.abspath(path):
                 path = sub
         self.status_var.set(f"正在扫描：{os.path.basename(path)} ...")
-        self.mat_folder_label.config(text=f"扫描中… {os.path.basename(path)}", fg="#666")
+        self.mat_folder_label.config(text=f"扫描中… {os.path.basename(path)}", fg=C_HINT_FG)
         rules = kc.load_material_rules(os.path.join(BASE_DIR, kc.MATERIAL_RULES_FILE))
 
         def worker():
@@ -445,13 +550,14 @@ class App:
                 before = len(w.material_paths)
                 w.add_materials(paths)
                 filled += len(w.material_paths) - before
-        self.mat_folder_label.config(text=os.path.basename(path), fg="#2c6e49")
-        detail = "，".join(f"{i}项{len(result[i])}" for i in range(1, 13) if result[i])
+        self.mat_folder_label.config(text=os.path.basename(path), fg=C_OK_FG)
+        parts = [f"{i}项{len(result[i])}个" for i in range(1, 13) if result[i]]
+        detail = "、".join(parts)
         if len(detail) > 80:
             detail = detail[:77] + "…"
-        suffix = (f"，{len(unmatched)} 个未匹配（可手动拖入）" if unmatched
-                  else "，全部匹配")
-        self.status_var.set(f"已自动填入 {filled} 个支撑材料{suffix}：{detail}")
+        suffix = (f"；{len(unmatched)} 个文件未匹配（可手动拖入）" if unmatched
+                  else "；全部匹配")
+        self.status_var.set(f"已自动填入 {filled} 个支撑材料{suffix}（{detail}）")
         # 未匹配文件过多时仅状态栏提示，避免弹窗刷屏
         if 0 < len(unmatched) <= 200:
             names = "\n".join(os.path.basename(u) for u in unmatched[:40])
@@ -462,7 +568,7 @@ class App:
 
     def _on_scan_failed(self, err):
         logging.error("扫描支撑材料失败: %s", err)
-        self.mat_folder_label.config(text="扫描失败", fg="#c0392b")
+        self.mat_folder_label.config(text="扫描失败", fg=C_ERR_FG)
         self.status_var.set("扫描失败")
         messagebox.showerror("扫描失败", err)
 
@@ -517,7 +623,7 @@ class App:
             if mats:
                 w.add_materials(mats)
                 mat_count += len(mats)
-        self.import_label.config(text=os.path.basename(path), fg="#2c6e49")
+        self.import_label.config(text=os.path.basename(path), fg=C_OK_FG)
         who = name + ("%s月" % month if month else "")
         msg = "已读取 %s 考评表：12 项内容 + %d 个支撑材料%s" % (
             who or os.path.basename(path), mat_count,

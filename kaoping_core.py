@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.1.2（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员履职考评表生成核心逻辑 v1.1.3（兼容 Windows 7 SP1 ~ Windows 11）"""
 
 import json
 import logging
