@@ -186,7 +186,7 @@ def test_read_eval_scores():
         assert d["total"] == "93"
         assert d["items"][1]["score"] == "20"
         assert d["items"][3]["score"] == "5"
-        assert d["items"][9]["desc"] == "未按违章查处"
+        assert d["items"][9]["desc"] == ""
         assert d["items"][2]["desc"] == ""
         assert len(d["items"]) == 13
         # 未找到姓名：报错并列出可用姓名

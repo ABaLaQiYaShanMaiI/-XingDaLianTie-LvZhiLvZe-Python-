@@ -298,6 +298,24 @@ def test_eval_scores_fill():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_auto_fill_super():
+    """自评得分已填的考评项：自动补齐上级评分(=自评得分)与评语(已完成)；已填不覆盖；未打分不生成。"""
+    items = {
+        1: {"score": "10", "super_score": "", "eval_desc": "", "materials": []},
+        2: {"score": "5", "super_score": "5分", "eval_desc": "人工已填", "materials": []},
+        3: {"score": "", "super_score": "", "eval_desc": "", "materials": []},
+        4: {"score": "8", "super_score": "", "eval_desc": "", "materials": [],
+            "sub": {"score": "10", "super_score": "", "eval_desc": "", "materials": []}},
+    }
+    gk._auto_fill_super(items)
+    assert items[1]["super_score"] == "10" and items[1]["eval_desc"] == "已完成"
+    assert items[2]["super_score"] == "5分" and items[2]["eval_desc"] == "人工已填"   # 已填不覆盖
+    assert items[3]["super_score"] == "" and items[3]["eval_desc"] == ""            # 未打分不生成
+    assert items[4]["super_score"] == "8" and items[4]["eval_desc"] == "已完成"     # 主行
+    assert items[4]["sub"]["super_score"] == "10" and items[4]["sub"]["eval_desc"] == "已完成"  # 双行sub
+
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

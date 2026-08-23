@@ -138,6 +138,26 @@ def _save_config(cfg):
         return False
 
 
+def _auto_fill_super(items):
+    """自评得分已填的考评项：自动补齐上级评分（=自评得分）与评语（=已完成），与之对应。
+
+    - 仅当「上级评分 / 评价描述」为空时才生成，已手工填写的内容不覆盖；
+    - 双行项（班组长第 1 项）的主行与第 2 行(sub)分别处理；
+    - 未填自评得分的考评项不生成。
+    """
+    for item in items.values():
+        for d in (item, item.get("sub") or {}):
+            score = (d.get("score") or "").strip()
+            if not score:
+                continue
+            if not (d.get("super_score") or "").strip():
+                d["super_score"] = score
+            if not (d.get("eval_desc") or "").strip():
+                d["eval_desc"] = "已完成"
+
+
+
+
 class ImageItem:
     """单个考评项的录入控件：自评描述/得分/材料文字/材料拖拽/评价描述/上级评分。
 
@@ -530,7 +550,7 @@ class App:
         r5.pack(fill=tk.X, pady=(4, 0))
         ttk.Label(r5, text="履职履责表:").pack(side=tk.LEFT)
         self.eval_label = tk.Label(
-            r5, text=f"选择月度履职履责表(.xlsx)，自动填入 {len(ITEM_LABELS)} 项自评得分与描述（扣分说明）",
+            r5, text=f"选择月度履职履责表(.xlsx)，自动填入 {len(ITEM_LABELS)} 项自评得分（excel 只提供姓名和分数）",
             bg=C_INPUT_BG, fg=C_HINT_FG, relief=tk.GROOVE, cursor="hand2")
         self.eval_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.eval_label.bind("<Button-1>", lambda e: self._read_eval_scores())
@@ -538,8 +558,8 @@ class App:
         self.eval_label.dnd_bind("<<Drop>>", self._drop_eval_scores)
         ToolTip(self.eval_label,
                 "读取月度履职履责表（.xlsx）：\n"
-                f"按「作业长月度履职评价表」sheet 读取所选作业长的 {len(ITEM_LABELS)} 项评分与扣分说明，\n"
-                "自动填入各考评项的「自评得分」与「自评描述」。\n"
+                f"按「作业长月度履职评价表」sheet 读取所选作业长的 {len(ITEM_LABELS)} 项评分（excel 只提供姓名和分数），\n"
+                "自动填入各考评项的「自评得分」。\n"
                 "文件中包含多个姓名时，会弹出对话框让您选择本次生成的作业长。")
         ttk.Button(r5, text="读取评分", width=9, command=self._read_eval_scores).pack(side=tk.LEFT, padx=2)
 
@@ -754,7 +774,7 @@ class App:
 
     # ============ 月度履职履责表(xlsx) 评分读取 ============
     def _read_eval_scores(self, path=None):
-        """读取履职履责表 .xlsx：按姓名把各考评项评分/扣分说明填入「自评得分/自评描述」。"""
+        """读取履职履责表 .xlsx：按姓名把各考评项评分填入「自评得分」（excel 只提供姓名和分数）。"""
         if not path:
             path = filedialog.askopenfilename(
                 title="选择月度履职履责表",
@@ -792,10 +812,8 @@ class App:
             if it.get("score"):
                 w.score_var.set(it["score"])
                 filled += 1
-            if it.get("desc"):
-                w.desc_var.set(it["desc"])
         self.eval_label.config(text=os.path.basename(path), fg=C_OK_FG)
-        msg = "已读取 %s 的履职履责表：%d 项评分/描述已填入" % (cur, filled)
+        msg = "已读取 %s 的履职履责表：%d 项评分已填入" % (cur, filled)
         total = data.get("total") or ""
         if total:
             msg += "，总分 %s" % total
@@ -874,6 +892,8 @@ class App:
         items = {}
         for w in self.items_widgets:
             items[w.index] = w.to_item()
+        # 自评得分已填的考评项：上级评分自动等于自评得分、评语自动填"已完成"（已填内容不覆盖）
+        _auto_fill_super(items)
         if not self._validate_items(items):
             return
 

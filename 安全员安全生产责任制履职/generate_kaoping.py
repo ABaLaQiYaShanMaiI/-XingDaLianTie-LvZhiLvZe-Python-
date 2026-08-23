@@ -133,6 +133,26 @@ def _save_config(cfg):
         return False
 
 
+def _auto_fill_super(items):
+    """自评得分已填的考评项：自动补齐上级评分（=自评得分）与评语（=已完成），与之对应。
+
+    - 仅当「上级评分 / 评价描述」为空时才生成，已手工填写的内容不覆盖；
+    - 双行项（班组长第 1 项）的主行与第 2 行(sub)分别处理；
+    - 未填自评得分的考评项不生成。
+    """
+    for item in items.values():
+        for d in (item, item.get("sub") or {}):
+            score = (d.get("score") or "").strip()
+            if not score:
+                continue
+            if not (d.get("super_score") or "").strip():
+                d["super_score"] = score
+            if not (d.get("eval_desc") or "").strip():
+                d["eval_desc"] = "已完成"
+
+
+
+
 class ImageItem:
     """单个考评项的录入控件：自评描述/得分/材料文字/材料拖拽/评价描述/上级评分"""
 
@@ -773,6 +793,8 @@ class App:
         items = {}
         for w in self.items_widgets:
             items[w.index] = w.to_item()
+        # 自评得分已填的考评项：上级评分自动等于自评得分、评语自动填"已完成"（已填内容不覆盖）
+        _auto_fill_super(items)
         if not self._validate_items(items):
             return
 

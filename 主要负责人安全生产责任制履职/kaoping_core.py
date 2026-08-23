@@ -269,12 +269,13 @@ def scan_materials_folder(folder, max_per_item=15, rules=None):
 XLSX_SHEET_INCLUDE = ("主要负责人", "评价")
 XLSX_SHEET_EXCLUDE = ("标准",)
 # 13 个考评项在 xlsx 表头中的匹配关键词（任一命中即可）
+# 关键词以模板/界面考评项名称为准；xlsx 表头用词与模板不一致时，请以模板为准统一后使用。
 XLSX_ITEM_KEYWORDS = {
     1: ("安全绩效",),
     2: ("隐患排查", "隐患"),
     3: ("安全检查", "检查"),
     4: ("安全教育", "培训"),
-    5: ("危险源", "风险"),
+    5: ("危险源管理", "危险源", "风险"),
     6: ("应急管理", "应急"),
     7: ("违章查处", "违章"),
     8: ("机构人员", "机构"),
@@ -358,9 +359,9 @@ def list_eval_names(xlsx_path):
 
 
 def read_eval_scores(xlsx_path, name):
-    """从月度履职履责表 xlsx 读取指定姓名班长的 %d 项评分与扣分说明。
+    """从月度履职履责表 xlsx 读取指定姓名班长的 %d 项评分（excel 表只提供姓名和分数）。
 
-    返回 {"name": 姓名, "items": {1..%d: {"score": str, "desc": str}},
+    返回 {"name": 姓名, "items": {1..%d: {"score": str, "desc": ""}},
            "total": 总分(str 或 "")}。
     未找到 sheet / 表头 / 姓名时抛出 ValueError 并附可用信息。
     """ % (N_ITEMS, N_ITEMS)
@@ -380,12 +381,12 @@ def read_eval_scores(xlsx_path, name):
         raise ValueError("文件中未找到姓名「%s」，可用姓名：%s"
                          % (name, "、".join(names) if names else "(空)"))
 
-    # 5) 读取各考评项评分与扣分说明、总分
+    # 5) 读取各考评项评分、总分（excel 表只提供姓名和分数，不读"扣分说明"列）
     items = {}
     for idx, col in item_cols.items():
         items[idx] = {
             "score": _norm_cell(sheet.cell(row=person_row, column=col).value),
-            "desc": _norm_cell(sheet.cell(row=person_row, column=col + 1).value),
+            "desc": "",
         }
     total = _norm_cell(sheet.cell(row=person_row, column=total_col).value) if total_col else ""
     return {"name": name.strip(), "items": items, "total": total}
