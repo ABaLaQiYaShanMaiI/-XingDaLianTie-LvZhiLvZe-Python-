@@ -288,6 +288,156 @@ def test_ole_kind_match():
     assert kc._ole_kind_match("pkg", "excel") is True
 
 
+def test_self_check():
+    """岗位参数自检应通过（行映射/总分行/权重键自洽）。"""
+    kc.self_check()
+
+
+def _first_item_row(idx):
+    """取考评项主行（兼容单行 int 与双行 list 两种 ITEM_ROWS 值）。"""
+    v = kc.ITEM_ROWS[idx]
+    return v[0] if isinstance(v, (list, tuple)) else v
+
+
+class _FakeRange:
+    """极简 Range 替身：Text 读写委托给所属单元格；Collapse/End 仅为接口占位。"""
+
+    def __init__(self, owner):
+        self._owner = owner
+        self.End = 1
+        self.InlineShapes = owner.inline_shapes
+
+    @property
+    def Text(self):
+        return self._owner.text
+
+    @Text.setter
+    def Text(self, value):
+        self._owner.text = value
+
+    def Collapse(self, direction=0):
+        return None
+
+    def InsertParagraphAfter(self):
+        return None
+
+
+class _FakeCell:
+    def __init__(self, text=""):
+        self.text = text
+        self.inline_shapes = []
+        self.Range = _FakeRange(self)
+
+
+class _FakeTable:
+    """假 Word 表格：Cell(r, c) 返回可写的假单元格。"""
+
+    def __init__(self, rows, cols):
+        self.Rows = type("Rows", (), {"Count": rows})()
+        self.Columns = type("Cols", (), {"Count": cols})()
+        self._cells = {}
+
+    def Cell(self, row, col):
+        key = (row, col)
+        if key not in self._cells:
+            self._cells[key] = _FakeCell("")
+        return self._cells[key]
+
+
+class _FakeTables:
+    """假 Tables 集合：doc.Tables(1) 可调用返回指定表格。"""
+
+    def __init__(self, table):
+        self._table = table
+
+    def __call__(self, index=1):
+        return self._table
+
+
+class _FakeDoc:
+    def __init__(self, table):
+        self.Tables = _FakeTables(table)
+        self.saved = None
+
+    def SaveAs2(self, path, fmt=0):
+        self.saved = (path, fmt)
+
+    def SaveAs(self, path, fmt=0):
+        self.saved = (path, fmt)
+
+    def Close(self, save=False):
+        pass
+
+
+class _FakeWord:
+    """假 Word.Application：仅支撑 generate_doc 用到的接口（不需要真实 Word）。"""
+
+    def __init__(self, doc):
+        self.doc = doc
+        self.Visible = True
+        self.DisplayAlerts = -1
+
+    @property
+    def Documents(self):
+        return self
+
+    def Open(self, path):
+        return self.doc
+
+    def Quit(self):
+        pass
+
+
+def test_generate_doc_fill_sequence():
+    """Mock Word COM：验证生成流程填充顺序（表头 -> 逐项 -> 合计 -> 保存），无需本机 Word。
+
+    覆盖：模板结构校验入口、表头姓名/月份占位替换、逐项内容写入、合计写入、SaveAs2 输出。
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        tb = _FakeTable(kc.TOTAL_ROW, 10)
+        header_cell = tb.Cell(kc.HEADER_ROW, 1)
+        if getattr(kc, "HEADER_ROLE_NEXT", "") == "评价月份":
+            # 主要负责人模板表头无「管理者姓名」栏
+            header_cell.text = (kc.HEADER_ROLE_LABEL + "  孙忠   "
+                                + kc.HEADER_MONTH_LABEL + "                 评价人员签字：（手签）")
+        else:
+            header_cell.text = (kc.HEADER_ROLE_LABEL + "  孙忠      管理者姓名：（手签）"
+                                + kc.HEADER_MONTH_LABEL + "                 评价人员签字：（手签）")
+        fake_doc = _FakeDoc(tb)
+        orig_new_word = kc._new_word_app
+        kc._new_word_app = lambda: _FakeWord(fake_doc)
+        try:
+            items = {}
+            for idx in range(1, kc.N_ITEMS + 1):
+                items[idx] = {"desc": "d%d" % idx, "score": "5", "material_text": "",
+                              "materials": [], "eval_desc": "e%d" % idx, "super_score": "4"}
+            items[1]["score"] = "10"
+            items[1]["super_score"] = "9"
+            out = os.path.join(tmp, "out.doc")
+            kc.generate_doc("模板.doc", out, "张三", 8, items, year=2026)
+        finally:
+            kc._new_word_app = orig_new_word
+        # 表头：姓名与月份已替换
+        assert "张三" in header_cell.text and "8月" in header_cell.text
+        # 逐项内容写入对应列（第 1 项主行）
+        r1 = _first_item_row(1)
+        assert tb.Cell(r1, kc.COL_SELF_DESC).text == "d1"
+        assert tb.Cell(r1, kc.COL_SELF_SCORE).text == "10"
+        assert tb.Cell(r1, kc.COL_EVAL_DESC).text == "e1"
+        assert tb.Cell(r1, kc.COL_EVAL_SCORE).text == "9"
+        # 合计写入 TOTAL_ROW 的自评/上级列
+        self_total = 10 + 5 * (kc.N_ITEMS - 1)
+        super_total = 9 + 4 * (kc.N_ITEMS - 1)
+        assert tb.Cell(kc.TOTAL_ROW, kc.COL_SELF_DESC).text == str(self_total)
+        assert tb.Cell(kc.TOTAL_ROW, kc.COL_EVAL_DESC).text == str(super_total)
+        # 已按输出路径调用 SaveAs2
+        assert fake_doc.saved == (out, 0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

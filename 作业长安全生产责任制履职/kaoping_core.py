@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""作业长履职考评表生成核心逻辑 v3.0.0（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""作业长履职考评表生成核心逻辑 v3.0.1（兼容 Windows 7 SP1 ~ Windows 11）"""
 
 import json
 import logging
@@ -43,6 +43,30 @@ def _item_rows(idx):
     """返回考评项对应的表格行列表（双行项返回两行）。"""
     v = ITEM_ROWS[idx]
     return list(v) if isinstance(v, (list, tuple)) else [v]
+
+
+def self_check():
+    """岗位参数自检：行映射/总分行/权重键自洽（纯运算，不依赖 Word）。
+
+    在 GUI 启动与 generate_doc 入口各调一次；不一致直接抛 AssertionError，
+    防止模板被换错或参数被改坏后错格写入。
+    """
+    problems = []
+    n = len(ITEM_ROWS)
+    if sorted(ITEM_ROWS) != list(range(1, n + 1)):
+        problems.append("ITEM_ROWS 键应与 1..%d 连续" % n)
+    flat = []
+    for v in ITEM_ROWS.values():
+        flat.extend(list(v) if isinstance(v, (list, tuple)) else [v])
+    if TOTAL_ROW <= max(flat):
+        problems.append("TOTAL_ROW(%d) 应大于最大考评项行(%d)" % (TOTAL_ROW, max(flat)))
+    if len(ITEM_MATCH_RULES) != n or set(ITEM_MATCH_RULES) != set(ITEM_ROWS):
+        problems.append("ITEM_MATCH_RULES 键应与 ITEM_ROWS 一致（%d vs %d）"
+                        % (len(ITEM_MATCH_RULES), n))
+    if problems:
+        raise AssertionError("岗位参数自检失败：\n- " + "\n- ".join(problems))
+
+
 HEADER_ROW = 1
 COL_SELF_DESC = 6
 COL_SELF_SCORE = 7
@@ -51,6 +75,12 @@ COL_EVAL_DESC = 9
 COL_EVAL_SCORE = 10
 IMG_MAX_SIZE_CM = 2.0      # 图片/OLE 对象显示长宽上限（等比缩放，长宽均不超过该值）
 DEFAULT_NAME_PATTERN = "作业长安全生产责任制履职履责考评表({X}月{XXX}).doc"
+
+# 表头占位标签：_replace_slot 用（含冒号）。岗位模板固定，模板改版时需同步模板结构自检。
+HEADER_ROLE_LABEL = "考评对象（作业长）："
+HEADER_ROLE_NEXT = "管理者姓名"
+HEADER_MONTH_LABEL = "评价月份："
+HEADER_MONTH_NEXT = "评价人员签字"
 
 
 def find_template(template_path=None):
@@ -285,6 +315,17 @@ def _norm_cell(v):
     return "".join(str(v).split()) if v is not None else ""
 
 
+def _xlsx_header_preview(sheet, max_rows=6, max_cols=20):
+    """返回 sheet 前几行的原始文本预览，格式变化报错时附上，便于快速定位。"""
+    lines = []
+    for r in range(1, min(sheet.max_row, max_rows) + 1):
+        vals = [_norm_cell(sheet.cell(row=r, column=c).value)
+                for c in range(1, min(sheet.max_column, max_cols) + 1)]
+        vals = [v for v in vals if v]
+        lines.append("第%d行: %s" % (r, " | ".join(vals) if vals else "(空)"))
+    return "\n".join(lines)
+
+
 def _locate_eval_sheet(xlsx_path):
     """定位履职履责表 xlsx 的结构，返回 (sheet, header_row, name_col, total_col, item_cols)。
     sheet / 表头 / 考评项缺失时抛出 ValueError 并附可用信息。"""
@@ -309,7 +350,9 @@ def _locate_eval_sheet(xlsx_path):
             header_row = r
             break
     if header_row is None:
-        raise ValueError("未找到考评项表头行（含「扣分说明」），文件格式可能已变化")
+        raise ValueError(
+            "未找到考评项表头行（含「扣分说明」），文件格式可能已变化。"
+            "文件开头内容如下（便于对照业务方改版）：\n" + _xlsx_header_preview(sheet))
 
     # 2) 姓名列 / 得分合计列（在表头行之前找标签）
     name_col, total_col = None, None
@@ -332,8 +375,10 @@ def _locate_eval_sheet(xlsx_path):
         hit = [c for c, h in header_vals.items()
                if h and any(k in h for k in kws) and c not in item_cols.values()]
         if not hit:
-            raise ValueError("表头中未找到第 %d 项「%s」，文件格式可能已变化"
-                             % (idx, ITEM_MATCH_RULES[idx][0]))
+            raise ValueError(
+                "表头中未找到第 %d 项「%s」，文件格式可能已变化。"
+                "文件开头内容如下（便于对照业务方改版）：\n%s"
+                % (idx, ITEM_MATCH_RULES[idx][0], _xlsx_header_preview(sheet)))
         item_cols[idx] = hit[0]
     return sheet, header_row, name_col, total_col, item_cols
 
@@ -598,10 +643,10 @@ def _read_item_fields(tb, row):
 def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
     """读取已生成的考评表 .doc：姓名/月份/%d 项自评与上级评价/支撑材料。
 
-    支撑材料（图片/OLE 内嵌文件）提取保存到 out_dir（默认 .doc 同目录"提取材料"）。
-    返回 {"name", "month", "items": {1..%d: {"desc","score","material_text",
-           "materials":[文件路径], "eval_desc","super_score",
-           "sub":{第2行同构数据}(仅双行项)}}, "warnings":[str]}。
+    支撑材料（图片/OLE 内嵌文件）提取保存到 out_dir 下的「姓名月份」子目录
+    （默认 .doc 同目录"提取材料"，子目录形如 提取材料\\孙忠8月）。
+    返回 {"name", "month", "items": {1..%d: {...}}, "warnings": [str],
+          "out_dir": 实际落盘目录}。
     """ % (N_ITEMS, N_ITEMS)
     doc_path = os.path.abspath(doc_path)
     out_dir = out_dir or os.path.join(os.path.dirname(doc_path), "提取材料")
@@ -627,6 +672,14 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
         if not month:
             # 旧版生成的文档「评价月份」可能留空：从文件名兜底提取（如「孙忠8月」→ 8）
             month = _month_from_filename(os.path.basename(doc_path))
+        # 提取材料按「姓名+月份」分子目录，避免多次读取混在一起（技术方案 3.8）
+        try:
+            sub = str(name or "").strip() + (str(month or "").strip() + "月" if month else "")
+            if sub:
+                out_dir = os.path.join(out_dir, sub)
+                os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            pass
         for idx in range(1, N_ITEMS + 1):
             rows = _item_rows(idx)
             items[idx] = _read_item_fields(tb, rows[0])
@@ -752,7 +805,8 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
                                                       if r[0] == idx and r[3] == 1),
                                                      key=lambda r: r[1])]
 
-    return {"name": name, "month": month, "items": items, "warnings": warnings}
+    return {"name": name, "month": month, "items": items, "warnings": warnings,
+            "out_dir": out_dir}
 
 
 def _set_cell_text(cell, text):
@@ -970,10 +1024,10 @@ def _fill_header(cell, name, month):
     raw = cell.Range.Text
     body = raw.replace("\x07", "").rstrip("\r")
 
-    # 姓名：考评对象（作业长）：...管理者姓名
-    body = _replace_slot(body, "考评对象（作业长）：", "管理者姓名", str(name).strip())
-    # 月份：评价月份：...评价人员签字
-    body = _replace_slot(body, "评价月份：", "评价人员签字", str(month).strip() + "月")
+    # 姓名：HEADER_ROLE_LABEL...HEADER_ROLE_NEXT
+    body = _replace_slot(body, HEADER_ROLE_LABEL, HEADER_ROLE_NEXT, str(name).strip())
+    # 月份：HEADER_MONTH_LABEL...HEADER_MONTH_NEXT
+    body = _replace_slot(body, HEADER_MONTH_LABEL, HEADER_MONTH_NEXT, str(month).strip() + "月")
 
     rng = cell.Range
     rng.End = rng.End - 1
@@ -1040,6 +1094,7 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
                     'eval_desc','super_score', 'sub':{第2行同构数据}(仅双行项)}}
     progress_cb: 可选回调，每处理完一个考评项调用 progress_cb(idx)，idx=1..13。
     """
+    self_check()          # 岗位参数自检（纯运算，不依赖 Word）
     if year is None:
         year = datetime.now().year
     word = _new_word_app()

@@ -1,0 +1,156 @@
+{
+  "files": [
+    "kaoping_core.py",
+    "generate_kaoping.py",
+    "tests/test_core.py",
+    "tests/test_gui.py",
+    "test_ole.py"
+  ],
+  "divergences": [
+    {
+      "file": "kaoping_core.py",
+      "func": "_locate_eval_sheet",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "kaoping_core.py",
+      "func": "_parse_kaoping_header",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "kaoping_core.py",
+      "func": "_sum_scores",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "kaoping_core.py",
+      "func": "extract_kaoping_doc",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "kaoping_core.py",
+      "func": "generate_doc",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "kaoping_core.py",
+      "func": "read_eval_scores",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "kaoping_core.py",
+      "func": "scan_materials_folder",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "tests/test_core.py",
+      "func": "_make_fake_lvzhilv",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "tests/test_core.py",
+      "func": "test_item_rows",
+      "summary": {
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "tests/test_core.py",
+      "func": "test_match_materials_file",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "tests/test_core.py",
+      "func": "test_read_eval_scores",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "tests/test_core.py",
+      "func": "test_scan_materials_folder",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "tests/test_core.py",
+      "func": "test_sum_scores",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "tests/test_gui.py",
+      "func": "test_apply_kaoping_doc_fill",
+      "summary": {
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
+      "file": "tests/test_gui.py",
+      "func": "test_material_rules_and_weights",
+      "summary": {
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    }
+  ]
+}

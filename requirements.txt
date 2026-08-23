@@ -1,0 +1,11 @@
+# 安全生产责任制履职清单考评表 自动生成工具 —— 开发/构建依赖（锁版本）
+# 开发环境：Python 3.8.10（Win7 SP1 兼容的最后版本，见 README「开发环境」与《技术方案》2.3）
+# 安装：pip install -r requirements.txt
+# 说明：Windows 平台专用（tkinterdnd2 / pywin32 仅在 Windows 有意义）。
+
+pyinstaller==5.13.2        # 打包单文件 exe（spec 内置 UCRT，兼容纯净 Win7）
+pywin32==306               # Word COM（win32com/olefile 底层）
+pillow==10.4.0             # 图片缩略图 / 超大图片压缩 / 剪贴板导出
+tkinterdnd2==0.4.3         # GUI 拖拽
+openpyxl==3.1.5            # 读取月度履职履责表 xlsx 评分
+olefile==0.47              # 解析 .doc ObjectPool 还原 OLE 内嵌材料

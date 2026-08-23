@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.4（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.5（兼容 Windows 7 SP1 ~ Windows 11）"""
 import logging
 import os
 import sys
@@ -18,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),
@@ -408,7 +408,7 @@ class App:
         self.out_label.bind("<Button-1>", lambda e: self._sel_outdir())
         ToolTip(self.out_label,
                 "输出目录：生成后的 .doc 考评表保存位置，点击可重新选择。\n"
-                "读取已生成考评表时，提取出的支撑材料会保存到「输出目录\\提取材料」。")
+                "读取已生成考评表时，提取出的支撑材料会保存到「输出目录\\提取材料\\姓名月份」子目录。")
         ttk.Button(r2, text="选择", width=7, command=self._sel_outdir).pack(side=tk.LEFT, padx=2)
 
         # ================= ② 材料导入（可选） =================
@@ -447,7 +447,7 @@ class App:
                 "复用已生成的考评表（.doc）：\n"
                 "自动读取姓名/月份、12 项自评与上级评分/评价、内嵌的支撑材料\n"
                 "（图片、Excel、Word 等），回填界面后可替换材料、改月份再生成新表。\n"
-                "提取出的材料保存到「输出目录\\提取材料」。")
+                "提取出的材料保存到「输出目录\\提取材料\\姓名月份」子目录。")
         ttk.Button(r4, text="读取考评表", width=9, command=self._read_kaoping_doc).pack(side=tk.LEFT, padx=2)
 
         r5 = ttk.Frame(mat)
@@ -664,9 +664,10 @@ class App:
                 mat_count += len(mats)
         self.import_label.config(text=os.path.basename(path), fg=C_OK_FG)
         who = name + ("%s月" % month if month else "")
+        mat_dir = data.get("out_dir") or out_dir
         msg = "已读取 %s 考评表：12 项内容 + %d 个支撑材料%s" % (
             who or os.path.basename(path), mat_count,
-            "；材料已提取到 " + out_dir if mat_count else "")
+            "；材料已提取到 " + mat_dir if mat_count else "")
         self.status_var.set(msg)
         if data.get("warnings"):
             messagebox.showwarning("读取提示", "\n".join(data["warnings"]))
@@ -890,6 +891,38 @@ class App:
             pass
 
 
+def _self_check():
+    """启动时校验岗位参数自洽：core 行映射 + GUI 考评项/标准分/权重首词/双行拆分。
+
+    与 kc.self_check() 配合使用；发现不一致直接抛 AssertionError，
+    把「模板被换错/参数被改坏」这类事故在启动时拦下。
+    """
+    kc.self_check()
+    problems = []
+    if len(ITEM_LABELS) != len(kc.ITEM_ROWS):
+        problems.append("GUI 考评项数(%d) 与 core ITEM_ROWS(%d) 不一致"
+                        % (len(ITEM_LABELS), len(kc.ITEM_ROWS)))
+    if sorted(i for i, _n, _s in ITEM_LABELS) != sorted(kc.ITEM_ROWS):
+        problems.append("GUI ITEM_LABELS 序号应与 core ITEM_ROWS 一致")
+    total_score = sum(s for _i, _n, s in ITEM_LABELS)
+    if total_score != 100:
+        problems.append("考评项标准分合计应为 100，实际 %d" % total_score)
+    score_of = dict((i, s) for i, _n, s in ITEM_LABELS)
+    for idx, label, score in ITEM_LABELS:
+        kws = kc.ITEM_MATCH_RULES.get(idx) or []
+        if kws and kws[0] not in label:
+            problems.append("第 %d 项「%s」未含权重首词「%s」" % (idx, label, kws[0]))
+    sub = globals().get("SUB_ROW_MAX") or {}
+    for idx, split_score in sub.items():
+        score = score_of.get(idx)
+        if score is None:
+            problems.append("SUB_ROW_MAX 序号 %d 不存在于考评项" % idx)
+        elif not (0 < split_score < score):
+            problems.append("SUB_ROW_MAX[%d]=%d 应在 (0, %d) 内" % (idx, split_score, score))
+    if problems:
+        raise AssertionError("GUI 岗位参数自检失败：\n- " + "\n- ".join(problems))
+
+
 def main():
     # 高 DPI 显示器适配（Win8.1+）：让 tkinter 按物理分辨率缩放，避免界面偏小
     try:
@@ -897,6 +930,11 @@ def main():
     except Exception:
         pass
     _setup_logging()
+    try:
+        _self_check()
+    except AssertionError as e:
+        messagebox.showerror("岗位参数自检失败", str(e))
+        raise
     root = TkinterDnD.Tk()
     App(root)
     root.mainloop()

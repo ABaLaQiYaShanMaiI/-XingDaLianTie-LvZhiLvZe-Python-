@@ -1,4 +1,0 @@
-empty: 9.6s, 52KB
-image x1: 9.4s, 566KB
-xlsx-embed x1: 10.5s, 63899KB
-ALLDONE
