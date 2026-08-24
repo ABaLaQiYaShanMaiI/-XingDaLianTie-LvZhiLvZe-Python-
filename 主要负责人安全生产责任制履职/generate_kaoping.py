@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""主要负责人安全生产责任制履职清单考评表 自动生成工具 GUI v4.0.1（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""主要负责人安全生产责任制履职清单考评表 自动生成工具 GUI v4.0.2（兼容 Windows 7 SP1 ~ Windows 11）"""
 import logging
 import os
 import sys
@@ -18,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "4.0.1"
+VERSION = "4.0.2"
 
 # 主要负责人考评表 13 个考评项（序号/名称/标准分，合计 100 分）
 ITEM_LABELS = [

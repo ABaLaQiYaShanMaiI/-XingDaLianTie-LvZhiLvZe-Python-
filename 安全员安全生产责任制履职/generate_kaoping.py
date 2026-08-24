@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.5（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员安全生产责任制履职清单考评表 自动生成工具 GUI v1.1.6（兼容 Windows 7 SP1 ~ Windows 11）"""
 import logging
 import os
 import sys
@@ -18,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 
 ITEM_LABELS = [
     (1, "安全绩效", 20),

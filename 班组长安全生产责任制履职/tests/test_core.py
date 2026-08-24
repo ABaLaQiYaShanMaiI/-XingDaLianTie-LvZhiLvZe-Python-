@@ -48,14 +48,14 @@ def test_item_rows():
 
 def test_sum_scores():
     items = {
-        1: {"score": "10", "super_score": "10", "sub": {"score": "8", "super_score": "9"}},
+        1: {"score": "10", "super_score": "10", "sub": {"material_text": "", "materials": []}},
         2: {"score": "5", "super_score": ""},
         3: {"score": "abc", "super_score": "5"},
     }
-    # 第 1 项两行得分 10+8、第 2 项 5、第 3 项 abc 忽略 → 23
-    assert kc._sum_scores(items, "score") == "23"
-    # 上级：10+9+5 = 24
-    assert kc._sum_scores(items, "super_score") == "24"
+    # 第 1 项共用评分 10、第 2 项 5、第 3 项 abc 忽略 → 15
+    assert kc._sum_scores(items, "score") == "15"
+    # 上级：10+5 = 15
+    assert kc._sum_scores(items, "super_score") == "15"
     assert kc._sum_scores({}, "score") == ""
 
 
@@ -106,20 +106,22 @@ def test_scan_materials_folder():
 
 
 def test_fit_size():
-    # 已在 2cm 内（含浮点尾差）原样返回——绝不能进入缩放分支，
+    # 已在 宽1.4cm(39.69pt) × 高1.2cm(34.02pt) 内（含浮点尾差）原样返回——绝不能进入缩放分支，
     # 否则再次 ScaleWidth=100 会把已缩好的对象放大回原始大小（曾实测 486×864pt）。
-    assert kc._fit_size(31.9, 56.700001, 2.0) == (31.9, 56.700001)
-    assert kc._fit_size(56.7, 56.7, 2.0) == (56.7, 56.7)
-    assert kc._fit_size(56.4, 42.0, 2.0) == (56.4, 42.0)
-    # 超限等比缩小，长边 ≤ 2cm（56.7pt）
-    tw, th = kc._fit_size(486, 864, 2.0)
-    assert tw <= 56.7 + 1e-6 and th <= 56.7 + 1e-6
+    assert kc._fit_size(39.6, 34.0, 1.4, 1.2) == (39.6, 34.0)
+    assert kc._fit_size(31.9, 33.5, 1.4, 1.2) == (31.9, 33.5)
+    assert kc._fit_size(39.68, 34.01, 1.4, 1.2) == (39.68, 34.01)
+    # 超限等比缩小：宽 ≤ 1.4cm（39.69pt）、高 ≤ 1.2cm（34.02pt）
+    tw, th = kc._fit_size(486, 864, 1.4, 1.2)
+    assert tw <= 39.69 + 1e-6 and th <= 34.02 + 1e-6
     assert abs(tw / th - 486 / 864) < 0.01
-    tw, th = kc._fit_size(2400, 1800, 2.0)
-    assert tw <= 56.7 + 1e-6 and th <= 56.7 + 1e-6
+    tw, th = kc._fit_size(2400, 1800, 1.4, 1.2)
+    # 宽受限四舍五入到 39.7（仍在 39.69 + 0.5 容差内，与保存前兜底校验一致）
+    assert tw <= 39.7 + 1e-6 and th <= 34.02 + 1e-6
+    assert abs(tw / th - 2400 / 1800) < 0.01
     # 异常输入不抛错
-    assert kc._fit_size(0, 100, 2.0) == (0, 100)
-    assert kc._fit_size(-5, 100, 2.0) == (-5, 100)
+    assert kc._fit_size(0, 100, 1.4, 1.2) == (0, 100)
+    assert kc._fit_size(-5, 100, 1.4, 1.2) == (-5, 100)
 
 
 def test_prepare_image_file():

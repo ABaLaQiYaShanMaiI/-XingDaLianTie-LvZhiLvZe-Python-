@@ -93,20 +93,22 @@ def test_scan_materials_folder():
 
 
 def test_fit_size():
-    # 已在 2cm 内（含浮点尾差）原样返回——绝不能进入缩放分支，
+    # 已在 宽1.4cm(39.69pt) × 高1.2cm(34.02pt) 内（含浮点尾差）原样返回——绝不能进入缩放分支，
     # 否则再次 ScaleWidth=100 会把已缩好的对象放大回原始大小（曾实测 486×864pt）。
-    assert kc._fit_size(31.9, 56.700001, 2.0) == (31.9, 56.700001)
-    assert kc._fit_size(56.7, 56.7, 2.0) == (56.7, 56.7)
-    assert kc._fit_size(56.4, 42.0, 2.0) == (56.4, 42.0)
-    # 超限等比缩小，长边 ≤ 2cm（56.7pt）
-    tw, th = kc._fit_size(486, 864, 2.0)
-    assert tw <= 56.7 + 1e-6 and th <= 56.7 + 1e-6
+    assert kc._fit_size(39.6, 34.0, 1.4, 1.2) == (39.6, 34.0)
+    assert kc._fit_size(31.9, 33.5, 1.4, 1.2) == (31.9, 33.5)
+    assert kc._fit_size(39.68, 34.01, 1.4, 1.2) == (39.68, 34.01)
+    # 超限等比缩小：宽 ≤ 1.4cm（39.69pt）、高 ≤ 1.2cm（34.02pt）
+    tw, th = kc._fit_size(486, 864, 1.4, 1.2)
+    assert tw <= 39.69 + 1e-6 and th <= 34.02 + 1e-6
     assert abs(tw / th - 486 / 864) < 0.01
-    tw, th = kc._fit_size(2400, 1800, 2.0)
-    assert tw <= 56.7 + 1e-6 and th <= 56.7 + 1e-6
+    tw, th = kc._fit_size(2400, 1800, 1.4, 1.2)
+    # 宽受限四舍五入到 39.7（仍在 39.69 + 0.5 容差内，与保存前兜底校验一致）
+    assert tw <= 39.7 + 1e-6 and th <= 34.02 + 1e-6
+    assert abs(tw / th - 2400 / 1800) < 0.01
     # 异常输入不抛错
-    assert kc._fit_size(0, 100, 2.0) == (0, 100)
-    assert kc._fit_size(-5, 100, 2.0) == (-5, 100)
+    assert kc._fit_size(0, 100, 1.4, 1.2) == (0, 100)
+    assert kc._fit_size(-5, 100, 1.4, 1.2) == (-5, 100)
 
 
 def test_prepare_image_file():

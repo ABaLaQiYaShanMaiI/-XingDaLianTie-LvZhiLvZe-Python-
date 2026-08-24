@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""安全员履职考评表生成核心逻辑 v1.1.5（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""安全员履职考评表生成核心逻辑 v1.1.6（兼容 Windows 7 SP1 ~ Windows 11）"""
 
 import json
 import logging
@@ -30,7 +30,8 @@ COL_SELF_SCORE = 7
 COL_MATERIAL = 8
 COL_EVAL_DESC = 9
 COL_EVAL_SCORE = 10
-IMG_MAX_SIZE_CM = 2.0      # 图片/OLE 对象显示长宽上限（等比缩放，长宽均不超过该值）
+IMG_MAX_WIDTH_CM = 1.4     # 图片/OLE 对象显示宽度上限（等比缩放，宽不超过该值，避免被单元格遮挡）
+IMG_MAX_HEIGHT_CM = 1.2    # 图片/OLE 对象显示高度上限（等比缩放，高不超过该值，避免被单元格遮挡）
 DEFAULT_NAME_PATTERN = "安全员安全生产责任制履职清单考评表({X}月{XXX}).doc"
 
 # 表头占位标签：_replace_slot 用（含冒号）。岗位模板固定，模板改版时需同步模板结构自检。
@@ -809,20 +810,21 @@ MAX_EMBED_PX = 1600  # 图片嵌入文档前的最大边长（像素），压缩
 FIT_TOLERANCE_PT = 0.5  # 尺寸达标容差(pt)：Word 返回宽高常带浮点尾差（如 56.700001）
 
 
-def _fit_size(w, h, max_cm):
-    """计算在 max_cm(厘米) 限制内的目标尺寸(pt)。
+def _fit_size(w, h, max_w_cm, max_h_cm):
+    """计算在 max_w_cm(宽) × max_h_cm(高) 限制内的目标尺寸(pt)。
 
     已达标（含浮点容差）原样返回。调用方以返回值是否变化来判断是否需要缩放；
-    对象本身已在 2cm 内时绝不能进入缩放分支——否则再次调用
+    对象本身已在限制内时绝不能进入缩放分支——否则再次调用
     ScaleWidth/ScaleHeight=100 会把已缩好的对象放回原始大小，破坏版式
     （曾实测：2cm 内图片被还原成 486×864pt，撑爆表格）。
     """
-    max_pt = _cm2pt(max_cm)
+    max_w_pt = _cm2pt(max_w_cm)
+    max_h_pt = _cm2pt(max_h_cm)
     if w <= 0 or h <= 0:
         return w, h
-    if w <= max_pt + FIT_TOLERANCE_PT and h <= max_pt + FIT_TOLERANCE_PT:
+    if w <= max_w_pt + FIT_TOLERANCE_PT and h <= max_h_pt + FIT_TOLERANCE_PT:
         return w, h
-    scale = min(max_pt / w, max_pt / h)
+    scale = min(max_w_pt / w, max_h_pt / h)
     return round(w * scale, 1), round(h * scale, 1)
 
 
@@ -830,7 +832,7 @@ def _prepare_image_file(path, tmp_dir):
     """图片边长超过 MAX_EMBED_PX 时，等比压缩到 tmp_dir 下的临时文件。
 
     返回 (嵌入路径, 是否为临时文件)。压缩只影响文档体积，显示尺寸仍由
-    IMG_MAX_SIZE_CM 控制；任何异常都回退原文件，不影响主流程。
+    IMG_MAX_WIDTH_CM / IMG_MAX_HEIGHT_CM 控制；任何异常都回退原文件，不影响主流程。
     """
     from PIL import Image
 
@@ -857,7 +859,7 @@ def _prepare_image_file(path, tmp_dir):
 
 
 def _insert_image(cell, path, tmp_dir=None):
-    """在单元格末尾插入单张图片（内嵌），自动等比缩放，长宽均不超过 IMG_MAX_SIZE_CM。
+    """在单元格末尾插入单张图片（内嵌），自动等比缩放，宽不超过 IMG_MAX_WIDTH_CM、高不超过 IMG_MAX_HEIGHT_CM。
 
     tmp_dir 非空时先对超大图片做像素压缩（控制 .doc 体积），再插入。
     """
@@ -869,7 +871,7 @@ def _insert_image(cell, path, tmp_dir=None):
         ow, oh = im.size
     if ow <= 0 or oh <= 0:
         return False
-    tw, th = _fit_size(ow, oh, IMG_MAX_SIZE_CM)
+    tw, th = _fit_size(ow, oh, IMG_MAX_WIDTH_CM, IMG_MAX_HEIGHT_CM)
     rng = cell.Range
     rng.End = rng.End - 1      # 排除单元格结束符 \x07
     rng.Collapse(0)            # 折叠到单元格末尾内部
@@ -881,22 +883,23 @@ def _insert_image(cell, path, tmp_dir=None):
 
 
 def _fit_inline_size(shp):
-    """将内嵌对象（图片/OLE）等比缩放，使长宽均不超过 IMG_MAX_SIZE_CM。
+    """将内嵌对象（图片/OLE）等比缩放，使宽不超过 IMG_MAX_WIDTH_CM、高不超过 IMG_MAX_HEIGHT_CM。
 
     实测：图片/Excel 等 OLE 可通过 Width/Height 赋值缩放，
     而 Word 文档类 OLE 图标会忽略 Width/Height 赋值，需改用
     ScaleWidth/ScaleHeight（相对原始尺寸的百分比）。
 
-    注意：对象已在 2cm 内（含浮点尾差）必须直接返回；否则再次调用
+    注意：对象已在限制内（含浮点尾差）必须直接返回；否则再次调用
     ScaleWidth/ScaleHeight=100 会把已缩好的对象放回原始大小，
     曾实测导致输出文档中图片被放大到自然尺寸、撑爆表格版式。
     """
-    max_pt = _cm2pt(IMG_MAX_SIZE_CM)
+    max_w_pt = _cm2pt(IMG_MAX_WIDTH_CM)
+    max_h_pt = _cm2pt(IMG_MAX_HEIGHT_CM)
     try:
         w, h = shp.Width, shp.Height
     except Exception:
         return
-    tw, th = _fit_size(w, h, IMG_MAX_SIZE_CM)
+    tw, th = _fit_size(w, h, IMG_MAX_WIDTH_CM, IMG_MAX_HEIGHT_CM)
     if tw == w and th == h:
         return
     # 方式一：直接设置宽高（对图片/Excel OLE 有效）
@@ -906,7 +909,7 @@ def _fit_inline_size(shp):
     except Exception:
         pass
     # 方式二：若宽高赋值未生效（尺寸几乎没变，如 Word 文档类 OLE 图标），
-    # 改用百分比缩放（相对原始尺寸），等比缩到 2cm 以内。
+    # 改用百分比缩放（相对原始尺寸），等比缩到限制以内。
     try:
         w2, h2 = shp.Width, shp.Height
     except Exception:
@@ -915,7 +918,7 @@ def _fit_inline_size(shp):
         return
     if w2 >= w - 0.5 or h2 >= h - 0.5:
         try:
-            scale = min(max_pt / w, max_pt / h)
+            scale = min(max_w_pt / w, max_h_pt / h)
             shp.ScaleWidth = round(scale * 100, 1)
             shp.ScaleHeight = round(scale * 100, 1)
         except Exception:
@@ -924,7 +927,7 @@ def _fit_inline_size(shp):
 
 def _insert_ole(cell, path):
     """在单元格末尾插入文件为 OLE 嵌入对象（图标+文件名，可双击打开）。
-    保持 Word 自然显示尺寸（图标+文件名标签），随后等比缩小到 IMG_MAX_SIZE_CM 以内。
+    保持 Word 自然显示尺寸（图标+文件名标签），随后等比缩小到宽 IMG_MAX_WIDTH_CM、高 IMG_MAX_HEIGHT_CM 以内。
     """
     name = os.path.basename(path)
     rng = cell.Range
@@ -1119,10 +1122,11 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
         _set_cell_text(tb.Cell(TOTAL_ROW, COL_SELF_DESC), self_total)
         _set_cell_text(tb.Cell(TOTAL_ROW, COL_EVAL_DESC), super_total)
 
-        # 保存前统一缩放 C8 全部内嵌对象（图片/OLE），确保长宽均 ≤ IMG_MAX_SIZE_CM。
+        # 保存前统一缩放全部内嵌对象（图片/OLE），确保宽 ≤ IMG_MAX_WIDTH_CM、高 ≤ IMG_MAX_HEIGHT_CM。
         # OLE 对象在插入瞬间尺寸可能未稳定，故在此兜底再缩放一次；
-        # 仍有超限者记入日志，便于排查（正常情况下不应再有 2cm 外对象）。
-        max_pt = _cm2pt(IMG_MAX_SIZE_CM)
+        # 仍有超限者记入日志，便于排查（正常情况下不应再有超限对象）。
+        max_w_pt = _cm2pt(IMG_MAX_WIDTH_CM)
+        max_h_pt = _cm2pt(IMG_MAX_HEIGHT_CM)
         oversized = []
         for idx in range(1, 13):
             try:
@@ -1130,8 +1134,8 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
                 for shp in list(mat_cell.Range.InlineShapes):
                     _fit_inline_size(shp)
                     try:
-                        if (shp.Width > max_pt + FIT_TOLERANCE_PT
-                                or shp.Height > max_pt + FIT_TOLERANCE_PT):
+                        if (shp.Width > max_w_pt + FIT_TOLERANCE_PT
+                                or shp.Height > max_h_pt + FIT_TOLERANCE_PT):
                             oversized.append((idx, round(shp.Width, 1),
                                               round(shp.Height, 1)))
                     except Exception:
@@ -1139,7 +1143,7 @@ def generate_doc(template_path, output_path, name, month, items, year=None,
             except Exception:
                 pass
         if oversized:
-            logging.warning("生成文档中仍有超出 2cm 上限的对象: %s", oversized)
+            logging.warning("生成文档中仍有超出尺寸上限的对象: %s", oversized)
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         # SaveAs2 是 Word 2010+ 的方法；Word 2007 机器自动回退 SaveAs，兼容性更好

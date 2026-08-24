@@ -92,13 +92,14 @@ def test_imageitem_materials():
 
 
 def test_imageitem_double_row():
-    """双行项（第 1 项安全绩效）：第 2 行独立材料区、to_item 含 sub、clear 双清、apply_sub 回填。"""
+    """双材料项（第 1 项安全绩效）：第 2 行独立材料区、评分共用 0~标准分、clear 双清、apply_sub 回填。"""
     tmp = tempfile.mkdtemp()
     try:
         root, app = _new_app(tmp)
         try:
-            it = app.items_widgets[0]                       # 第 1 项 = 双行项
-            assert it.sub_max == 10
+            it = app.items_widgets[0]                       # 第 1 项 = 双材料项
+            assert it.has_sub_mat is True
+            assert it.score_var.get() == "20"               # 共用评分默认标准分 20
             # 第 2 行独立材料区
             f_sub = _touch(tmp, "材料2.xlsx")
             it.add_materials([f_sub], "sub_")
@@ -106,28 +107,22 @@ def test_imageitem_double_row():
             assert it.material_paths == []
             it.add_materials([_touch(tmp, "材料1.doc")])    # 主行
             assert len(it.material_paths) == 1
-            # to_item 含 sub
-            it.sub_desc_var.set("第2行描述")
-            it.sub_score_var.set("8")
+            # to_item 含 sub（仅材料，无评分）
             item = it.to_item()
-            assert item["sub"]["desc"] == "第2行描述"
-            assert item["sub"]["score"] == "8"
+            assert item["score"] == "20"
             assert item["sub"]["materials"] == [f_sub]
-            # apply_sub 回填
+            assert "score" not in item["sub"]
+            # apply_sub 回填（仅材料）
             it2 = app.items_widgets[1]                      # 单行项无 sub 控件
             it2.apply_sub({"desc": "x", "score": "5"})
-            assert it2.sub_max is None
-            it.sub_score_var.set("")
-            it.apply_sub({"score": "9", "desc": "回填", "super_score": "10"})
-            assert it.sub_score_var.get() == "9"
-            assert it.sub_desc_var.get() == "回填"
-            assert it.sub_super_var.get() == "10"
+            assert it2.has_sub_mat is False
+            it.score_var.set("10")
+            it.apply_sub({"score": "8", "material_text": "旧版回填", "materials": [f_sub]})
+            assert it.sub_material_paths == [f_sub]
             # clear 双清
             it.clear()
             assert it.desc_var.get() == ""
-            assert it.score_var.get() == "20"               # 主行恢复标准分
-            assert it.sub_desc_var.get() == ""
-            assert it.sub_score_var.get() == "10"           # 第 2 行恢复其标准分
+            assert it.score_var.get() == "20"               # 共用评分恢复标准分
             assert it.material_paths == [] and it.sub_material_paths == []
         finally:
             root.destroy()
@@ -161,10 +156,10 @@ def test_app_build_layout():
             assert hasattr(app, "import_label")        # v1.1.2 读取已生成考评表(.doc)
             assert not hasattr(app, "ref_label")
             assert not hasattr(app, "ref_materials")
-            # 第 1 项「安全绩效」为双行项，应渲染第 2 行控件（sub_ 前缀属性）
+            # 第 1 项「安全绩效」为双材料项：渲染第 2 行材料区（sub_ 前缀属性），评分共用
             it1 = app.items_widgets[0]
-            assert it1.sub_max == 10
-            assert hasattr(it1, "sub_desc_var") and hasattr(it1, "sub_thumb_frame")
+            assert it1.has_sub_mat is True
+            assert hasattr(it1, "sub_drop_label") and hasattr(it1, "sub_thumb_frame")
             bottom = app.btn_generate.master           # “一键生成”最先布局，缩小不被遮挡
             assert bottom.winfo_children()[0] is app.btn_generate
             assert app.canvas.bind("<MouseWheel>")     # 滚轮绑定
@@ -192,15 +187,19 @@ def test_validate_items():
             assert app._validate_items(ok) is False
             ok[1]["score"] = "abc"                    # 非数字
             assert app._validate_items(ok) is False
-            ok[1]["score"] = "10分"                   # 中文“分”后缀合法（双行第 1 行上限 10）
+            ok[1]["score"] = "10分"                   # 中文“分”后缀合法（共用评分 0~20 内）
             assert app._validate_items(ok) is True
-            # 双行第 2 行（sub）校验
-            ok[1]["sub"] = {"score": "11", "super_score": ""}   # 超出 0~10
-            assert app._validate_items(ok) is False
-            ok[1]["sub"] = {"score": "8", "super_score": "9分"} # 合法
+            # 双材料项第 1 项：共用评分 0~标准分（不再拆 10+10）
+            ok[1]["score"] = "18"
             assert app._validate_items(ok) is True
-            # 双行第 1 行不能超过 10（=20-10）
-            ok[1]["score"] = "12"
+            ok[1]["score"] = "20"
+            assert app._validate_items(ok) is True
+            # 第 2 行无评分（sub 仅材料），不影响校验
+            ok[1]["sub"] = {"material_text": "", "materials": []}
+            assert app._validate_items(ok) is True
+            # 其余项仍按各自标准分校验
+            ok[1]["score"] = "5"
+            ok[2]["score"] = "6"                            # 第 2 项标准分 5 → 超出
             assert app._validate_items(ok) is False
         finally:
             root.destroy()
@@ -298,7 +297,7 @@ def test_apply_kaoping_doc_fill():
                                  "material_text": "未发生事故", "materials": [],
                                  "eval_desc": "未发生", "super_score": "10",
                                  "sub": {"desc": "第2行描述", "score": "8",
-                                         "material_text": "", "materials": [],
+                                         "material_text": "第2行材料", "materials": [],
                                          "eval_desc": "", "super_score": "9"}}
         fake_data["items"][3] = {"desc": "未按违章查处", "score": "5",
                                  "material_text": "", "materials": [fake_mat],
@@ -313,9 +312,9 @@ def test_apply_kaoping_doc_fill():
                 assert app.month_var.get() == "7"
                 it1 = app.items_widgets[0]
                 assert it1.desc_var.get() == "未发生事故"
-                assert it1.score_var.get() == "10" and it1.super_var.get() == "10"
-                assert it1.sub_desc_var.get() == "第2行描述"
-                assert it1.sub_score_var.get() == "8" and it1.sub_super_var.get() == "9"
+                # 旧版两行各 10+8 → 回填合并为共用评分 18
+                assert it1.score_var.get() == "18" and it1.super_var.get() == "10"
+                assert it1.sub_material_paths == []
                 it3 = app.items_widgets[2]
                 assert it3.score_var.get() == "5"
                 assert it3.material_paths == [fake_mat]
@@ -366,14 +365,14 @@ def test_auto_fill_super():
         2: {"score": "5", "super_score": "5分", "eval_desc": "人工已填", "materials": []},
         3: {"score": "", "super_score": "", "eval_desc": "", "materials": []},
         4: {"score": "8", "super_score": "", "eval_desc": "", "materials": [],
-            "sub": {"score": "10", "super_score": "", "eval_desc": "", "materials": []}},
+            "sub": {"material_text": "", "materials": []}},
     }
     gk._auto_fill_super(items)
     assert items[1]["super_score"] == "10" and items[1]["eval_desc"] == "已完成"
     assert items[2]["super_score"] == "5分" and items[2]["eval_desc"] == "人工已填"   # 已填不覆盖
     assert items[3]["super_score"] == "" and items[3]["eval_desc"] == ""            # 未打分不生成
     assert items[4]["super_score"] == "8" and items[4]["eval_desc"] == "已完成"     # 主行
-    assert items[4]["sub"]["super_score"] == "10" and items[4]["sub"]["eval_desc"] == "已完成"  # 双行sub
+    # 第 2 行(sub)无评分，不生成上级评分/评语
 
 
 

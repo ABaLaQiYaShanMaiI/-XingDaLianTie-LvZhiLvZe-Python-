@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""班组长安全生产责任制履职清单考评表 自动生成工具 GUI v2.0.1（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""班组长安全生产责任制履职清单考评表 自动生成工具 GUI v2.0.2（兼容 Windows 7 SP1 ~ Windows 11）"""
 import logging
 import os
 import sys
@@ -18,7 +18,7 @@ import pythoncom
 
 import kaoping_core as kc
 
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 
 # 班组长考评表 17 个考评项（序号/名称/标准分，合计 100 分）
 ITEM_LABELS = [
@@ -41,11 +41,11 @@ ITEM_LABELS = [
     (17, "安全技能", 5),
 ]
 
-# 双行考评项：模板中该考评项纵向占用两行、每行独立填写。
-# 值为第 2 行的标准分（第 1 行为 该项标准分 - 该值）。
-# 当前仅第 1 项「安全绩效」(20 分) 拆为 10 + 10；如需调整拆分请改此处。
-SUB_ROW_MAX = {
-    1: 10,
+# 双材料考评项：模板中该考评项纵向占用两行，两行各有一个独立的支撑材料区。
+# 评分与标准分一致（0~标准分），只填一次、两行共用，不再拆分 10+10。
+# 当前仅第 1 项「安全绩效」(标准分 20) 如此；如需调整请改此处。
+SUB_MATERIAL_ITEMS = {
+    1,
 }
 
 # 打包(exe)后 __file__ 指向 _MEIPASS 临时目录，配置文件/默认输出目录需以 exe 目录为准
@@ -150,7 +150,7 @@ def _auto_fill_super(items):
     """自评得分已填的考评项：自动补齐上级评分（=自评得分）与评语（=已完成），与之对应。
 
     - 仅当「上级评分 / 评价描述」为空时才生成，已手工填写的内容不覆盖；
-    - 双行项（班组长第 1 项）的主行与第 2 行(sub)分别处理；
+    - 双材料项（班组长第 1 项）第 2 行(sub)无评分，仅处理主行；
     - 未填自评得分的考评项不生成。
     """
     for item in items.values():
@@ -169,18 +169,19 @@ def _auto_fill_super(items):
 class ImageItem:
     """单个考评项的录入控件：自评描述/得分/材料文字/材料拖拽/评价描述/上级评分。
 
-    sub_max 非空时表示双行考评项（如第 1 项「安全绩效」在模板中占两行），
-    额外渲染第 2 行的一组填写框与材料区，数据保存在 to_item() 的 "sub" 子字典中。
+    has_sub_mat 为 True 时表示双材料考评项（如第 1 项「安全绩效」在模板中占两行），
+    额外渲染第 2 行的支撑材料区；评分两行共用（0~标准分，只填一次），
+    数据保存在 to_item() 的 "sub" 子字典中（仅含材料）。
     """
 
     MAX_MATERIALS = 15
 
-    def __init__(self, parent, root, index, title, std_score, sub_max=None):
+    def __init__(self, parent, root, index, title, std_score, has_sub_mat=False):
         self.root = root
         self.index = index
         self.title = title
         self.std_score = std_score
-        self.sub_max = sub_max          # 双行项第 2 行标准分；None=单行项
+        self.has_sub_mat = has_sub_mat   # 双材料项：第 2 行仅材料区、评分共用
         self.material_paths = []
         self.sub_material_paths = []
         self._thumb_refs = []
@@ -195,23 +196,21 @@ class ImageItem:
         self._build_fields(self.frame, "")
         self._build_material_zone(self.frame, "")
 
-        # 双行项：第 2 行填写区
-        if sub_max is not None:
+        # 双材料项：第 2 行仅支撑材料区（评分与第 1 行共用，只填一次）
+        if has_sub_mat:
             ttk.Separator(self.frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(6, 2))
-            ttk.Label(self.frame, text=f"第 2 行（标准分 {sub_max} 分）",
+            ttk.Label(self.frame, text="第 2 行（支撑材料，评分与第 1 行共用 0~标准分）",
                       foreground="#1E5AA8",
                       font=("Microsoft YaHei", 9, "bold")).pack(anchor="w", padx=2, pady=(4, 0))
-            self._build_fields(self.frame, "sub_", max_score=sub_max)
             self._build_material_zone(self.frame, "sub_")
 
     # ---------- 字段构建 ----------
-    def _build_fields(self, parent, prefix, max_score=None):
+    def _build_fields(self, parent, prefix):
         """构建两行输入框（自评描述/自评得分/材料说明 + 评价描述/上级评分）。
-        prefix="" 为主行（属性不带前缀），prefix="sub_" 为第 2 行。"""
+        prefix="" 为主行；双材料项第 2 行仅有材料区（见 _build_material_zone）。"""
         grid = ttk.Frame(parent)
         grid.pack(fill=tk.X)
-        if max_score is None:
-            max_score = self.std_score
+        max_score = self.std_score
 
         # 第一行：自评描述 / 自评得分 / 材料说明（两行同列对齐，得分旁标注有效范围）
         ttk.Label(grid, text="自评描述:").grid(row=0, column=0, sticky="e", padx=(2, 6), pady=2)
@@ -387,32 +386,18 @@ class ImageItem:
             "eval_desc": self.eval_var.get().strip(),
             "super_score": self.super_var.get().strip(),
         }
-        if self.sub_max is not None:
+        if self.has_sub_mat:
+            # 第 2 行仅支撑材料；评分与第 1 行共用（0~标准分，只填一次）
             d["sub"] = {
-                "desc": self.sub_desc_var.get().strip(),
-                "score": self.sub_score_var.get().strip(),
-                "material_text": self.sub_mat_var.get().strip(),
                 "materials": list(self.sub_material_paths),
-                "eval_desc": self.sub_eval_var.get().strip(),
-                "super_score": self.sub_super_var.get().strip(),
             }
         return d
 
     def apply_sub(self, data):
-        """把读取到的第 2 行数据回填到界面（双行项）。"""
+        """把读取到的第 2 行数据回填到界面（双材料项，仅材料）。"""
         data = data or {}
-        if self.sub_max is None:
+        if not self.has_sub_mat:
             return
-        if data.get("desc"):
-            self.sub_desc_var.set(data["desc"])
-        if data.get("score"):
-            self.sub_score_var.set(data["score"])
-        if data.get("material_text"):
-            self.sub_mat_var.set(data["material_text"])
-        if data.get("eval_desc"):
-            self.sub_eval_var.set(data["eval_desc"])
-        if data.get("super_score"):
-            self.sub_super_var.set(data["super_score"])
         mats = [p for p in (data.get("materials") or []) if p and os.path.exists(p)]
         if mats:
             self.add_materials(mats, "sub_")
@@ -424,12 +409,7 @@ class ImageItem:
         self.eval_var.set("")
         self.super_var.set("")
         self._clear_materials()
-        if self.sub_max is not None:
-            self.sub_desc_var.set("")
-            self.sub_score_var.set(str(self.sub_max))
-            self.sub_mat_var.set("")
-            self.sub_eval_var.set("")
-            self.sub_super_var.set("")
+        if self.has_sub_mat:
             self._clear_materials("sub_")
 
     def _clear_materials(self, prefix=""):
@@ -590,7 +570,7 @@ class App:
 
         for idx, title, std in ITEM_LABELS:
             w = ImageItem(self.list_frame, self.root, idx, title, std,
-                          sub_max=SUB_ROW_MAX.get(idx))
+                          has_sub_mat=idx in SUB_MATERIAL_ITEMS)
             self.items_widgets.append(w)
 
         # 鼠标滚轮：悬停在任意子控件上也能滚动中部列表
@@ -759,6 +739,18 @@ class App:
                 w.desc_var.set(it["desc"])
             if it.get("score"):
                 w.score_var.set(it["score"])
+            # 旧版考评表（第 1 项两行各填一档分，如 10+8）回填时合并为共用评分 0~标准分
+            if getattr(w, "has_sub_mat", False):
+                sub = it.get("sub") or {}
+                sub_score = (sub.get("score") or "").strip()
+                main_score = (it.get("score") or "").strip()
+                if sub_score and main_score:
+                    try:
+                        combined = float(main_score.rstrip("分")) + float(sub_score.rstrip("分"))
+                        combined = int(combined) if combined == int(combined) else combined
+                        w.score_var.set(str(combined))
+                    except ValueError:
+                        pass
             if it.get("material_text"):
                 w.mat_var.set(it["material_text"])
             if it.get("eval_desc"):
@@ -938,7 +930,7 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def _validate_items(self, items):
-        """校验自评得分/上级评分：必须为 0~标准分 之间的数字（双行项第 2 行按 SUB_ROW_MAX 校验）。"""
+        """校验自评得分/上级评分：必须为 0~标准分 之间的数字（双材料项第 2 行无评分）。"""
         std = {idx: s for idx, _t, s in ITEM_LABELS}
         for idx, it in items.items():
             for key, cn in (("score", "自评得分"), ("super_score", "上级评分")):
@@ -955,32 +947,6 @@ class App:
                     messagebox.showwarning("提示",
                                            f"第 {idx} 项「{cn}」= {num} 超出 0~{std[idx]} 分范围")
                     return False
-                # 双行项第 1 行的有效范围 = 标准分 - 第 2 行标准分
-                sub_max = SUB_ROW_MAX.get(idx)
-                if sub_max is not None:
-                    if num < 0 or num > std[idx] - sub_max:
-                        messagebox.showwarning(
-                            "提示",
-                            f"第 {idx} 项第 1 行「{cn}」= {num} 超出 0~{std[idx] - sub_max} 分范围")
-                        return False
-            # 双行项第 2 行（sub）
-            sub_max = SUB_ROW_MAX.get(idx)
-            if sub_max is not None:
-                sub = it.get("sub") or {}
-                for key, cn in (("score", "自评得分"), ("super_score", "上级评分")):
-                    v = (sub.get(key) or "").strip()
-                    if not v:
-                        continue
-                    try:
-                        num = float(v.rstrip("分"))
-                    except ValueError:
-                        messagebox.showwarning("提示",
-                                               f"第 {idx} 项第 2 行「{cn}」=「{v}」不是有效数字")
-                        return False
-                    if num < 0 or num > sub_max:
-                        messagebox.showwarning("提示",
-                                               f"第 {idx} 项第 2 行「{cn}」= {num} 超出 0~{sub_max} 分范围")
-                        return False
         return True
 
     def _on_generate_done(self, out_path, out_dir):
@@ -1025,7 +991,7 @@ class App:
 
 
 def _self_check():
-    """启动时校验岗位参数自洽：core 行映射 + GUI 考评项/标准分/权重首词/双行拆分。
+    """启动时校验岗位参数自洽：core 行映射 + GUI 考评项/标准分/权重首词/双材料项配置。
 
     与 kc.self_check() 配合使用；发现不一致直接抛 AssertionError，
     把「模板被换错/参数被改坏」这类事故在启动时拦下。
@@ -1045,13 +1011,10 @@ def _self_check():
         kws = kc.ITEM_MATCH_RULES.get(idx) or []
         if kws and kws[0] not in label:
             problems.append("第 %d 项「%s」未含权重首词「%s」" % (idx, label, kws[0]))
-    sub = globals().get("SUB_ROW_MAX") or {}
-    for idx, split_score in sub.items():
-        score = score_of.get(idx)
-        if score is None:
-            problems.append("SUB_ROW_MAX 序号 %d 不存在于考评项" % idx)
-        elif not (0 < split_score < score):
-            problems.append("SUB_ROW_MAX[%d]=%d 应在 (0, %d) 内" % (idx, split_score, score))
+    sub = globals().get("SUB_MATERIAL_ITEMS") or set()
+    for idx in sub:
+        if score_of.get(idx) is None:
+            problems.append("SUB_MATERIAL_ITEMS 序号 %d 不存在于考评项" % idx)
     if problems:
         raise AssertionError("GUI 岗位参数自检失败：\n- " + "\n- ".join(problems))
 
