@@ -310,6 +310,124 @@ def test_self_check():
     kc.self_check()
 
 
+def _make_fake_legacy_table(rows, item_rows):
+    """构造假 Word 表格：第 1 列为考评项序号，数据列填充对应内容（模拟旧版 40 行文档）。"""
+    tb = _FakeTable(rows, 10)
+    tb.Cell(1, 1).text = ("考评对象（主要负责人）：汪庆  评价月份：1月"
+                          "评价人员签字：（手签）")
+    scores = {1: "20", 7: "10", 12: "10", 13: "15"}
+    for idx, r in item_rows.items():
+        tb.Cell(r, 1).text = str(idx)
+        tb.Cell(r, kc.COL_SELF_DESC).text = "自评描述%d" % idx
+        tb.Cell(r, kc.COL_SELF_SCORE).text = scores.get(idx, "5")
+        tb.Cell(r, kc.COL_EVAL_DESC).text = "评价描述%d" % idx
+        tb.Cell(r, kc.COL_EVAL_SCORE).text = scores.get(idx, "5")
+        tb.Cell(r, kc.COL_MATERIAL).text = "材料说明%d" % idx
+    return tb
+
+
+_LEGACY_ITEM_ROWS_40 = {1: 3, 2: 6, 3: 9, 4: 10, 5: 12, 6: 14, 7: 16, 8: 19,
+                        9: 20, 10: 25, 11: 26, 12: 34, 13: 39}
+
+
+def test_detect_item_rows():
+    """第 1 列序号动态识别考评项主行（兼容旧版 40 行布局与 ①② 圈号形式）。"""
+    tb = _FakeTable(40, 10)
+    for idx, r in _LEGACY_ITEM_ROWS_40.items():
+        tb.Cell(r, 1).text = str(idx)
+    assert kc._detect_item_rows(tb) == _LEGACY_ITEM_ROWS_40
+    # ①② 圈号形式
+    tb2 = _FakeTable(40, 10)
+    tb2.Cell(3, 1).text = "①"
+    tb2.Cell(6, 1).text = "②"
+    assert kc._detect_item_rows(tb2) == {1: 3, 2: 6}
+    # 序号不连续 → None（防止错格读取）
+    tb3 = _FakeTable(40, 10)
+    tb3.Cell(3, 1).text = "1"
+    tb3.Cell(6, 1).text = "3"
+    assert kc._detect_item_rows(tb3) is None
+    # 日期样式行「2月」与「合计」行不误判
+    tb4 = _FakeTable(40, 10)
+    tb4.Cell(3, 1).text = "1"
+    tb4.Cell(4, 1).text = "2月"
+    tb4.Cell(6, 1).text = "合计"
+    assert kc._detect_item_rows(tb4) == {1: 3}
+
+
+def test_extract_kaoping_doc_legacy_40row():
+    """旧版 40 行考评表可读取：按第 1 列序号动态定位 13 个考评项，
+    姓名/月份/评分/材料说明全部回填，且带旧版提示。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        fake_doc = os.path.join(tmp, "主要负责人安全生产责任制履职清单考评表（汪庆1月）.doc")
+        open(fake_doc, "w").close()   # 仅占位，Word 为 Mock
+        tb = _make_fake_legacy_table(40, _LEGACY_ITEM_ROWS_40)
+        fake = _FakeDoc(tb)
+        orig_new_word, orig_read_pool = kc._new_word_app, kc._read_doc_object_pool
+        kc._new_word_app = lambda: _FakeWord(fake)
+        kc._read_doc_object_pool = lambda p: []
+        try:
+            data = kc.extract_kaoping_doc(fake_doc, out_dir=os.path.join(tmp, "提取材料"))
+        finally:
+            kc._new_word_app, kc._read_doc_object_pool = orig_new_word, orig_read_pool
+        assert data["name"] == "汪庆" and data["month"] == "1"
+        assert len(data["items"]) == 13
+        assert data["items"][1]["desc"] == "自评描述1"
+        assert data["items"][1]["score"] == "20"
+        assert data["items"][13]["desc"] == "自评描述13"
+        assert data["items"][13]["material_text"] == "材料说明13"
+        assert any("旧版" in w for w in data["warnings"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_extract_kaoping_doc_legacy_12items():
+    """旧版 12 项（无第 13 项「甲方契合度」）文档：读取前 12 项，第 13 项留空并提示。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        fake_doc = os.path.join(tmp, "主要负责人安全生产责任制履职清单考评表（汪庆2月）.doc")
+        open(fake_doc, "w").close()
+        rows12 = {k: v for k, v in _LEGACY_ITEM_ROWS_40.items() if k != 13}
+        tb = _make_fake_legacy_table(40, rows12)
+        fake = _FakeDoc(tb)
+        orig_new_word, orig_read_pool = kc._new_word_app, kc._read_doc_object_pool
+        kc._new_word_app = lambda: _FakeWord(fake)
+        kc._read_doc_object_pool = lambda p: []
+        try:
+            data = kc.extract_kaoping_doc(fake_doc, out_dir=os.path.join(tmp, "提取材料"))
+        finally:
+            kc._new_word_app, kc._read_doc_object_pool = orig_new_word, orig_read_pool
+        assert len(data["items"]) == 13
+        assert data["items"][12]["desc"] == "自评描述12"
+        assert data["items"][13]["desc"] == ""       # 缺项留空占位
+        assert data["items"][13]["score"] == ""
+        assert any("第13项" in w for w in data["warnings"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_extract_kaoping_doc_wrong_structure():
+    """非当前版式且第 1 列无连续序号：明确报错，不静默错格读取。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        fake_doc = os.path.join(tmp, "坏表.doc")
+        open(fake_doc, "w").close()
+        tb = _FakeTable(42, 10)                       # 42 行：第 1 列为空 → 无法识别
+        fake = _FakeDoc(tb)
+        orig_new_word = kc._new_word_app
+        kc._new_word_app = lambda: _FakeWord(fake)
+        try:
+            try:
+                kc.extract_kaoping_doc(fake_doc, out_dir=os.path.join(tmp, "提取材料"))
+                assert False, "应抛出 ValueError"
+            except ValueError as e:
+                assert "42 行" in str(e)
+        finally:
+            kc._new_word_app = orig_new_word
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _first_item_row(idx):
     """取考评项主行（兼容单行 int 与双行 list 两种 ITEM_ROWS 值）。"""
     v = kc.ITEM_ROWS[idx]
@@ -398,7 +516,7 @@ class _FakeWord:
     def Documents(self):
         return self
 
-    def Open(self, path):
+    def Open(self, path, ReadOnly=False):
         return self.doc
 
     def Quit(self):

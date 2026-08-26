@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""主要负责人履职考评表生成核心逻辑 v4.0.2（兼容 Windows 7 SP1 ~ Windows 11）"""
+"""主要负责人履职考评表生成核心逻辑 v4.0.3（兼容 Windows 7 SP1 ~ Windows 11）"""
 
 import json
 import logging
@@ -630,6 +630,51 @@ def _read_doc_object_pool(doc_path):
     return entries
 
 
+_CIRCLED_NUMS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬"
+
+
+def _empty_item_fields():
+    """空考评项字段：旧版文档缺该项（如旧 40 行版无第 13 项）时回填占位。"""
+    return {"desc": "", "score": "", "material_text": "", "materials": [],
+            "eval_desc": "", "super_score": ""}
+
+
+def _detect_item_rows(tb):
+    """扫描第 1 列序号，动态建立 考评项→表格主行 映射。
+
+    用于读取非当前版式（如旧版 40 行）的考评表：模板列 1 为各考评项序号
+    （1、2… 或 ①、②…），按序号连续出现的位置定位主行，不依赖固定行号。
+    序号必须连续 1..k（k ≤ N_ITEMS）才认为识别成功，否则返回 None，
+    由调用方给出明确报错，避免错格读取。
+    """
+    found = {}
+    n = tb.Rows.Count
+    for r in range(1, n + 1):
+        txt = _cell_text(tb, r, 1).strip()
+        if not txt:
+            continue
+        num = None
+        m = re.match(r"^(\d{1,2})\s*[、.．)）]*(.*)$", txt)
+        if m:
+            rest = m.group(2).strip()
+            # 排除「1月」「2月」这类日期样式行的干扰
+            if not rest or rest[0] not in "月年":
+                num = int(m.group(1))
+        elif txt[0] in _CIRCLED_NUMS:
+            num = _CIRCLED_NUMS.index(txt[0]) + 1
+        if not num or not (1 <= num <= N_ITEMS):
+            continue
+        if num in found:
+            continue
+        found[num] = r
+    if not found:
+        return None
+    top = max(found)
+    if any(i not in found for i in range(1, top + 1)):
+        return None
+    return found
+
+
 def _read_item_fields(tb, row):
     """读取一个考评行（表格 R 行）的 5 列填写内容（自评/材料/评价）。"""
     return {
@@ -664,12 +709,33 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
     mat_records = []  # 已提取材料：(考评项 idx, 形状内序号, 文件路径, 行号0主行/1第2行)
     ole_shape_items = []  # 需阶段2提取的 OLE 对象：每元素 = (考评项 idx, kind, 形状内序号, iconlabel文件名, 行号0/1)
     try:
-        doc = word.Documents.Open(doc_path)
+        doc = word.Documents.Open(doc_path, ReadOnly=True)
         tb = doc.Tables(1)
-        if tb.Rows.Count != TOTAL_ROW or tb.Columns.Count != 10:
+        rows, cols = tb.Rows.Count, tb.Columns.Count
+        if cols != 10:
             raise ValueError("表格结构异常：期望 %d 行×10 列，实际 %d 行×%d 列"
-                             % (TOTAL_ROW, tb.Rows.Count, tb.Columns.Count))
-        header_text = tb.Cell(HEADER_ROW, 1).Range.Text
+                             % (TOTAL_ROW, rows, cols))
+        if rows == TOTAL_ROW:
+            # 当前版式：按行映射直接定位（保持原行为，读取更快）
+            item_row_map = {idx: _item_rows(idx)[0] for idx in range(1, N_ITEMS + 1)}
+        else:
+            # 兼容旧版（如 40 行）文档：按第 1 列序号动态定位考评项行，
+            # 行布局变化/缺「甲方契合度」行都能正确读取
+            item_row_map = _detect_item_rows(tb)
+            if item_row_map is None:
+                raise ValueError(
+                    "表格结构异常：期望 %d 行×10 列，实际 %d 行×%d 列，且第 1 列未识别到连续考评项序号"
+                    "（1~%d）。旧版 40 行文档需保证第 1 列为各考评项序号（如 1、2… 或 ①、②…）方可读取。"
+                    % (TOTAL_ROW, rows, cols, N_ITEMS))
+            if rows == TOTAL_ROW - 1:
+                warnings.append(
+                    "检测到旧版 %d 行考评表：已按第 1 列序号自动定位考评项行，回填后可直接改月、"
+                    "用当前 41 行模板重新生成（避免对超大旧文档做 Word 克隆）。" % rows)
+            missing = [i for i in range(1, N_ITEMS + 1) if i not in item_row_map]
+            if missing:
+                warnings.append("旧版文档未包含考评项：%s，对应项已留空" %
+                                "、".join("第%d项" % i for i in missing))
+        header_text = _cell_retry(tb, HEADER_ROW, 1, attempts=3, delay=1.0).Range.Text
         name, month = _parse_kaoping_header(header_text)
         if not month:
             # 旧版生成的文档「评价月份」可能留空：从文件名兜底提取（如「孙忠8月」→ 8）
@@ -683,35 +749,40 @@ def extract_kaoping_doc(doc_path, out_dir=None, progress_cb=None):
         except Exception:
             pass
         for idx in range(1, N_ITEMS + 1):
-            rows = _item_rows(idx)
-            items[idx] = _read_item_fields(tb, rows[0])
-            if len(rows) > 1:
-                items[idx]["sub"] = _read_item_fields(tb, rows[1])
-            for ri, row in enumerate(rows):
-                mat_cell = tb.Cell(row, COL_MATERIAL)
-                mat_txt = (mat_cell.Range.Text.replace("\x07", "")
-                           .replace("\r", "").replace("\x01", "").strip())
-                target = items[idx] if ri == 0 else items[idx]["sub"]
-                target["material_text"] = mat_txt
-                mat_no = 0
-                for s in list(mat_cell.Range.InlineShapes):
-                    mat_no += 1
-                    if s.Type == 3:  # 图片
-                        out = os.path.join(out_dir, "项%d_图%d.png" % (idx, mat_no))
-                        if _export_inline_picture(s, out):
-                            mat_records.append((idx, mat_no, out, ri))
-                        else:
-                            warnings.append("第 %d 项第 %d 张图片提取失败" % (idx, mat_no))
-                    else:            # OLE 对象：原生 Office 尝试 COM 导出，其余交阶段2
-                        try:
-                            _label = s.OLEFormat.IconLabel or ""
-                        except Exception:
-                            _label = ""
-                        _kind, saved = _export_ole_via_com(s, idx, mat_no, out_dir, _label)
-                        if saved:
-                            mat_records.append((idx, mat_no, saved, ri))
-                        else:
-                            ole_shape_items.append((idx, _kind, mat_no, _label, ri))
+            row = item_row_map.get(idx)
+            if row is None:
+                # 旧版文档缺该项（如无「甲方契合度」）：留空占位，保证界面 13 项齐全
+                items[idx] = _empty_item_fields()
+                if progress_cb:
+                    try:
+                        progress_cb(idx)
+                    except Exception:
+                        pass
+                continue
+            items[idx] = _read_item_fields(tb, row)
+            mat_cell = _cell_retry(tb, row, COL_MATERIAL)
+            mat_txt = (mat_cell.Range.Text.replace("\x07", "")
+                       .replace("\r", "").replace("\x01", "").strip())
+            items[idx]["material_text"] = mat_txt
+            mat_no = 0
+            for s in list(mat_cell.Range.InlineShapes):
+                mat_no += 1
+                if s.Type == 3:  # 图片
+                    out = os.path.join(out_dir, "项%d_图%d.png" % (idx, mat_no))
+                    if _export_inline_picture(s, out):
+                        mat_records.append((idx, mat_no, out, 0))
+                    else:
+                        warnings.append("第 %d 项第 %d 张图片提取失败" % (idx, mat_no))
+                else:            # OLE 对象：原生 Office 尝试 COM 导出，其余交阶段2
+                    try:
+                        _label = s.OLEFormat.IconLabel or ""
+                    except Exception:
+                        _label = ""
+                    _kind, saved = _export_ole_via_com(s, idx, mat_no, out_dir, _label)
+                    if saved:
+                        mat_records.append((idx, mat_no, saved, 0))
+                    else:
+                        ole_shape_items.append((idx, _kind, mat_no, _label, 0))
             if progress_cb:
                 try:
                     progress_cb(idx)

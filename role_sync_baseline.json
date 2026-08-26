@@ -8,6 +8,16 @@
   ],
   "divergences": [
     {
+      "file": "generate_kaoping.py",
+      "func": "_self_check",
+      "summary": {
+        "安全员安全生产责任制履职": "不一致",
+        "班组长安全生产责任制履职": "不一致",
+        "作业长安全生产责任制履职": "不一致",
+        "主要负责人安全生产责任制履职": "不一致"
+      }
+    },
+    {
       "file": "kaoping_core.py",
       "func": "_locate_eval_sheet",
       "summary": {
