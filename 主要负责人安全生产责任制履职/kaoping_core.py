@@ -1030,6 +1030,30 @@ def _fit_inline_size(shp):
             pass
 
 
+def _enforce_ole_icon(shp, name):
+    """兜底：强制 OLE 对象以「图标+文件名」显示，而不是内容预览。
+
+    部分环境下 AddOLEObject 的 DisplayAsIcon 参数可能被忽略，或保存后
+    回退为内容预览；此处显式重设显示方式并核对，确保文档内只显示
+    「图标+文件名」（打印时能看清是什么文件）。
+    """
+    try:
+        if not shp.OLEFormat.DisplayAsIcon:
+            shp.OLEFormat.DisplayAsIcon = True
+    except Exception:
+        logging.warning("设置 OLE 图标显示失败: %s", name)
+        return
+    try:
+        shp.OLEFormat.IconLabel = name
+    except Exception:
+        pass
+    try:
+        if not shp.OLEFormat.DisplayAsIcon:
+            logging.warning("OLE 对象未能按图标显示: %s", name)
+    except Exception:
+        pass
+
+
 def _insert_ole(cell, path):
     """在单元格末尾插入文件为 OLE 嵌入对象（图标+文件名，可双击打开）。
     保持 Word 自然显示尺寸（图标+文件名标签），随后等比缩小到宽 IMG_MAX_WIDTH_CM、高 IMG_MAX_HEIGHT_CM 以内。
@@ -1041,6 +1065,7 @@ def _insert_ole(cell, path):
     shp = cell.Range.InlineShapes.AddOLEObject(
         FileName=path, LinkToFile=False, DisplayAsIcon=True, IconLabel=name,
         Range=rng)
+    _enforce_ole_icon(shp, name)
     _fit_inline_size(shp)
     return True
 
